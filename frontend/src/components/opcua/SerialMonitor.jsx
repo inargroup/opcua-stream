@@ -108,7 +108,7 @@ export default function SerialMonitor({ stats, format, onStart, onStop, onFormat
                     <div className="text-muted-foreground/60">$ waiting for transmission stream…</div>
                 )}
                 {frameLog.map((f) => (
-                    <div key={f.seq} className="mb-1 break-all">
+                    <div key={f.key} className="mb-1 break-all">
                         <span className="text-muted-foreground">[{fmtTime(f.ts)}]</span>{" "}
                         <span className="text-primary/80">#{String(f.seq).padStart(5, "0")}</span>{" "}
                         <span className={f.format === "json" ? "text-amber-400" : "text-fuchsia-400"}>{f.format === "json" ? "JSON" : "BIN "}</span>{" "}

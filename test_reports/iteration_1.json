@@ -1,0 +1,37 @@
+{
+  "summary": "Full backend + frontend E2E of OPC UA multi-server app. Backend pytest suite (9/9 pass): server CRUD, bad connect->502, browse Plant (11 vars), tag CRUD w/ 409 duplicate, runtime start/format/stop, Socket.IO connect+initial stats, wrong-path failure, json vs msgpack frames w/ size assertion, rapid reconnect. Frontend Playwright verified: SCADA dark dashboard, KPI header, Demo Plant connected, add-server dialog, tag-browser Plant descent (11 vars) + add Vibration + edit interval + delete, mode toggle, runtime dashboard w/ 5 tiles, start/stop transmission, WS LINKED indicator, serial terminal streaming, msgpack/json toggle. Two frontend runtime issues surfaced: React unhandled rejection storm ('Cannot add property N, object is not extensible', 44-72x) and duplicate React key warnings during Runtime mode.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "App.js runtime frame handler / RuntimeDashboard sparkline", "issue": "Unhandled promise rejection 'A background operation failed - Cannot add property 4, object is not extensible' fires 44-72 times while Runtime mode is streaming. Likely: React 18 dev-mode freezes state; historyRef.current arrays or sample objects passed through setState get frozen and subsequent mutations (arr.push, valuesRef.current[tag_id]=s where s is a frozen sample object from prior frame reference) fail. Suggest: deep-copy incoming samples and reassign new array references (arr = [...arr, {t,v}]) instead of mutating.", "selector": "N/A (runtime-dashboard active)", "priority": "HIGH"},
+      {"component": "RuntimeDashboard / Sparkline (Recharts)", "issue": "Console warning: 'Encountered two children with the same key' (1,2,3) repeats continuously in Runtime mode. Duplicate keys in the sparkline chart data or history push loop.", "selector": "runtime-dashboard", "priority": "MEDIUM"},
+      {"component": "ServerManager dialog (Radix DialogContent)", "issue": "A11y warning: 'Missing Description or aria-describedby for DialogContent'. Add DialogDescription.", "selector": "add-server-button dialog", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Live tile updates", "issue": "First tile-value observed did not change over a ~1.8s window despite frames arriving (msgpack BIN frames visible in serial-terminal, WS LINKED, tag_count=5). May be a symptom of the 'object is not extensible' rejection stalling the 250ms throttle flush that copies refs into state.", "affected_selectors": ["[data-testid^='tile-value-']"]}
+    ],
+    "design_issues": [
+      {"screen": "Global", "issues": ["Sonner toast (top-right) can overlap and intercept clicks on the mode-toggle buttons (mode-runtime-btn / mode-config-btn) immediately after actions like 'Tag added'. Consider moving toaster or shortening duration."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Fix runtime 'Cannot add property N, object is not extensible' rejection storm in App.js frame handler (avoid mutating frozen state-derived objects; create new refs each frame).",
+    "Fix duplicate React key warning in RuntimeDashboard Sparkline / history mapping.",
+    "Add DialogDescription to Add Server dialog to satisfy Radix a11y warning.",
+    "Consider re-positioning Sonner Toaster so it doesn't overlap the mode toggle in the header."
+  ],
+  "critical_code_review_comments": [
+    "server.py uses fastapi_app.on_event('startup'/'shutdown') which is deprecated in FastAPI - migrate to lifespan handlers.",
+    "server.py stores connections/runtime as module-level dicts (single-process only). Fine for demo but not horizontally scalable.",
+    "App.js frame handler mutates arrays inside historyRef then spreads them into state - safer to create fresh arrays each push.",
+    "Backend _to_jsonable stringifies non-primitive OPC UA types (e.g. DateTime) - acceptable, but numeric sparklines rely on typeof==='number', which is already handled."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "85%"},
+  "test_credentials": "None (no auth)",
+  "seed_data_creation": "Backend auto-seeds demo-server + 5 tags on startup. Tests create/delete transient TEST_ tagged data.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend pytest at /app/backend/tests/backend_test.py runs green (9/9). Frontend has an unhandled rejection storm in Runtime mode: 'Cannot add property N, object is not extensible' (React 18 dev-mode state freezing colliding with in-place mutations of arrays kept in refs). After E1 fixes App.js's frame handler (create new array refs each push, don't reuse sample objects across state snapshots), retest by switching to Runtime mode, clicking start-transmission-btn, and asserting that (a) no 'unhandled rejection' overlay appears within 10s and (b) first tile-value changes at least once within 3s while WS is LINKED. Also verify no duplicate-key React warnings in console."
+}

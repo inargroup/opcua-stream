@@ -40,6 +40,7 @@ export default function App() {
     const valuesRef = useRef({});
     const historyRef = useRef({});
     const framesRef = useRef([]);
+    const frameCounterRef = useRef(0);
     const dirtyRef = useRef(false);
     const socketRef = useRef(null);
 
@@ -76,27 +77,28 @@ export default function App() {
         socket.on("stats", (s) => setStats(s));
         socket.on("frame", (f) => {
             (f.samples || []).forEach((s) => {
-                valuesRef.current[s.tag_id] = s;
+                valuesRef.current[s.tag_id] = { ...s };
                 let num = null;
                 if (typeof s.value === "number") num = s.value;
                 else if (s.value === true) num = 1;
                 else if (s.value === false) num = 0;
                 if (num !== null) {
-                    const arr = historyRef.current[s.tag_id] || [];
-                    arr.push({ t: f.seq, v: num });
-                    if (arr.length > HISTORY_LEN) arr.shift();
-                    historyRef.current[s.tag_id] = arr;
+                    const prev = historyRef.current[s.tag_id] || [];
+                    const nextX = prev.length ? prev[prev.length - 1].i + 1 : 0;
+                    historyRef.current[s.tag_id] = prev.concat({ i: nextX, v: num }).slice(-HISTORY_LEN);
                 }
             });
-            framesRef.current.push({
+            frameCounterRef.current += 1;
+            const entry = {
+                key: frameCounterRef.current,
                 seq: f.seq,
                 ts: f.ts,
                 format: f.format,
                 byte_size: f.byte_size,
                 tag_count: f.tag_count,
                 preview: f.preview,
-            });
-            if (framesRef.current.length > 60) framesRef.current = framesRef.current.slice(-60);
+            };
+            framesRef.current = framesRef.current.concat(entry).slice(-60);
             dirtyRef.current = true;
         });
         return () => {
@@ -109,14 +111,23 @@ export default function App() {
         const id = setInterval(() => {
             if (!dirtyRef.current) return;
             dirtyRef.current = false;
+            const histCopy = {};
+            for (const k in historyRef.current) histCopy[k] = historyRef.current[k].slice();
             setTagValues({ ...valuesRef.current });
-            setTagHistory({ ...historyRef.current });
-            setFrameLog([...framesRef.current]);
+            setTagHistory(histCopy);
+            setFrameLog(framesRef.current.slice());
         }, 250);
         return () => clearInterval(id);
     }, []);
 
     const handleStart = async () => {
+        valuesRef.current = {};
+        historyRef.current = {};
+        framesRef.current = [];
+        frameCounterRef.current = 0;
+        setTagValues({});
+        setTagHistory({});
+        setFrameLog([]);
         const s = await api.startRuntime(format);
         setStats(s);
         toast.success(`Transmission started · ${format.toUpperCase()}`);
@@ -138,7 +149,7 @@ export default function App() {
 
     return (
         <div className="min-h-screen bg-background text-foreground">
-            <Toaster position="top-right" theme="dark" richColors />
+            <Toaster position="bottom-right" theme="dark" richColors />
             <StatsBar mode={mode} setMode={setMode} servers={servers} tags={tags} stats={stats} wsConnected={wsConnected} />
             <main className="px-4 md:px-6 pb-10 max-w-[1600px] mx-auto">
                 {mode === "config" ? (

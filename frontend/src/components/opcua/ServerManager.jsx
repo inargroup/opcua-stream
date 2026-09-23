@@ -12,6 +12,7 @@ import {
     DialogTitle,
     DialogTrigger,
     DialogFooter,
+    DialogDescription,
 } from "@/components/ui/dialog";
 import {
     Select,
@@ -98,6 +99,9 @@ export default function ServerManager({ servers, refreshServers, refreshTags }) 
                         <DialogContent className="bg-card border-border">
                             <DialogHeader>
                                 <DialogTitle className="font-heading tracking-tight">Add OPC UA Server</DialogTitle>
+                                <DialogDescription className="text-xs text-muted-foreground">
+                                    Define a source endpoint. The client opens a genuine OPC UA session on connect.
+                                </DialogDescription>
                             </DialogHeader>
                             <div className="space-y-3">
                                 <div>
