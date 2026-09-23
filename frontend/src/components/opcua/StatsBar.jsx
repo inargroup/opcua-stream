@@ -1,4 +1,4 @@
-import { Server as ServerIcon, Tag, Radio, Zap, Cpu, Settings2, Gauge } from "lucide-react";
+import { Server as ServerIcon, Tag, Radio, Zap, Cpu, Settings2, Gauge, Inbox } from "lucide-react";
 
 const fmtBytes = (b) => {
     if (b > 1048576) return `${(b / 1048576).toFixed(2)} MB`;
@@ -75,6 +75,17 @@ export default function StatsBar({ mode, setMode, servers, tags, stats, wsConnec
                                     }`}
                                 >
                                     <Radio className="h-3.5 w-3.5" /> Runtime
+                                </button>
+                                <button
+                                    data-testid="mode-receiver-btn"
+                                    onClick={() => setMode("receiver")}
+                                    className={`flex items-center gap-1.5 px-3 md:px-4 py-1.5 rounded text-xs font-medium transition-colors duration-200 ${
+                                        mode === "receiver"
+                                            ? "bg-primary text-primary-foreground"
+                                            : "text-muted-foreground hover:text-foreground"
+                                    }`}
+                                >
+                                    <Inbox className="h-3.5 w-3.5" /> Receiver
                                 </button>
                             </div>
                         </div>

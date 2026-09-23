@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
 from opcua_demo import DemoOPCUAServer
+from opcua_sink import SinkOPCUAServer
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -62,6 +63,26 @@ runtime = {
     "active_tag_count": 0,
 }
 
+# ---- Sink / receiver state ----
+sink_server = SinkOPCUAServer()
+sink_state = {
+    "running": False,
+    "port": None,
+    "tcp_server": None,
+    "frames_received": 0,
+    "bytes_received": 0,
+    "started_at": None,
+    "_win_start": 0.0,
+    "_win_frames": 0,
+    "_win_bytes": 0,
+    "_last_stats": 0.0,
+    "fps": 0.0,
+    "bps": 0.0,
+    "last_seq": 0,
+}
+sink_data = {"tags": {}}  # name -> {name,value,quality,sample_count,first_seen,last_update}
+_ingest_writer = None
+
 
 # ---------------------------------------------------------------------------
 # Models
@@ -102,6 +123,10 @@ class RuntimeStart(BaseModel):
 
 class FormatSet(BaseModel):
     format: str
+
+
+class SinkStart(BaseModel):
+    port: int = 9800
 
 
 def now_iso():
@@ -391,6 +416,7 @@ async def _read_tag_value(tag: dict):
 async def _transmission_loop():
     base_tick = 0.05  # 50ms -> up to 20 Hz
     last_stats = time.time()
+    last_reload = time.time()
     tags = await db.opcua_tags.find({}, {"_id": 0}).to_list(2000)
     for t in tags:
         t["_last"] = 0.0
@@ -398,6 +424,17 @@ async def _transmission_loop():
 
     while runtime["active"]:
         loop_start = time.time()
+
+        # Hot-reload tag list so newly added tags start streaming without a restart
+        if loop_start - last_reload >= 2.0:
+            fresh = await db.opcua_tags.find({}, {"_id": 0}).to_list(2000)
+            prev_last = {t["id"]: t["_last"] for t in tags}
+            for t in fresh:
+                t["_last"] = prev_last.get(t["id"], 0.0)
+            tags = fresh
+            runtime["active_tag_count"] = len(tags)
+            last_reload = loop_start
+
         due_samples = []
         for tag in tags:
             interval_s = max(tag.get("sampling_interval", 200), 20) / 1000.0
@@ -437,6 +474,9 @@ async def _transmission_loop():
             runtime["_win_frames"] += 1
             runtime["_win_bytes"] += size
 
+            if sink_state["running"]:
+                await _forward_to_ingest(packed, fmt)
+
             await sio.emit(
                 "frame",
                 {
@@ -468,12 +508,194 @@ async def _transmission_loop():
 
 
 # ---------------------------------------------------------------------------
+# Sink / Receiver — ingest serialized stream over a TCP port and re-publish
+# on a dynamic OPC UA server.
+# ---------------------------------------------------------------------------
+def _sink_status():
+    uptime = (time.time() - sink_state["started_at"]) if sink_state["started_at"] else 0
+    return {
+        "running": sink_state["running"],
+        "port": sink_state["port"],
+        "opcua_endpoint": sink_server.endpoint,
+        "frames_received": sink_state["frames_received"],
+        "bytes_received": sink_state["bytes_received"],
+        "fps": round(sink_state["fps"], 1),
+        "bps": round(sink_state["bps"], 1),
+        "tag_count": len(sink_data["tags"]),
+        "last_seq": sink_state["last_seq"],
+        "uptime": round(uptime, 1),
+    }
+
+
+async def _forward_to_ingest(packed: bytes, fmt: str):
+    """Transmit a serialized frame to the configured ingest TCP port (loopback)."""
+    global _ingest_writer
+    try:
+        if _ingest_writer is None:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", sink_state["port"]), timeout=1.0
+            )
+            _ingest_writer = writer
+        fmt_byte = b"\x00" if fmt == "json" else b"\x01"
+        header = len(packed).to_bytes(4, "big") + fmt_byte
+        _ingest_writer.write(header + packed)
+        await _ingest_writer.drain()
+    except Exception:
+        try:
+            if _ingest_writer:
+                _ingest_writer.close()
+        except Exception:
+            pass
+        _ingest_writer = None
+
+
+async def _process_received(core: dict, fmt: str, size: int):
+    seq = core.get("seq")
+    ts = core.get("ts")
+    samples = core.get("samples", [])
+    now = time.time()
+    new_tags = []
+    out_samples = []
+    for s in samples:
+        name = s.get("n")
+        val = s.get("v")
+        q = s.get("q")
+        if name is None:
+            continue
+        is_new = name not in sink_data["tags"]
+        await sink_server.upsert(name, val)
+        rec = sink_data["tags"].get(name)
+        if rec is None:
+            rec = {"name": name, "value": val, "quality": q, "sample_count": 0, "first_seen": now_iso(), "last_update": None}
+            sink_data["tags"][name] = rec
+            new_tags.append(name)
+        rec["value"] = val
+        rec["quality"] = q
+        rec["sample_count"] += 1
+        rec["last_update"] = ts
+        out_samples.append({"name": name, "value": val, "quality": q, "is_new": is_new})
+
+    sink_state["frames_received"] += 1
+    sink_state["bytes_received"] += size
+    sink_state["_win_frames"] += 1
+    sink_state["_win_bytes"] += size
+    sink_state["last_seq"] = seq
+
+    await sio.emit(
+        "sink_frame",
+        {"seq": seq, "ts": ts, "format": fmt, "byte_size": size, "tag_count": len(out_samples), "samples": out_samples, "new_tags": new_tags},
+    )
+
+    if now - sink_state["_last_stats"] >= 0.5:
+        win = now - sink_state["_win_start"]
+        if win > 0:
+            sink_state["fps"] = sink_state["_win_frames"] / win
+            sink_state["bps"] = sink_state["_win_bytes"] / win
+        sink_state["_win_start"] = now
+        sink_state["_win_frames"] = 0
+        sink_state["_win_bytes"] = 0
+        sink_state["_last_stats"] = now
+        await sio.emit("sink_stats", _sink_status())
+
+
+async def _handle_ingest(reader, writer):
+    peer = writer.get_extra_info("peername")
+    logger.info(f"Ingest connection from {peer}")
+    try:
+        while True:
+            header = await reader.readexactly(5)
+            length = int.from_bytes(header[:4], "big")
+            fmt = "json" if header[4] == 0 else "msgpack"
+            payload = await reader.readexactly(length)
+            try:
+                core = json.loads(payload) if fmt == "json" else msgpack.unpackb(payload, raw=False)
+                await _process_received(core, fmt, length + 5)
+            except Exception as e:  # noqa
+                logger.warning(f"ingest decode failed: {e}")
+    except asyncio.IncompleteReadError:
+        pass
+    except Exception as e:  # noqa
+        logger.debug(f"ingest handler ended: {e}")
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+
+@api_router.get("/sink")
+async def get_sink():
+    return _sink_status()
+
+
+@api_router.get("/sink/tags")
+async def get_sink_tags():
+    return sorted(sink_data["tags"].values(), key=lambda r: r["first_seen"])
+
+
+@api_router.post("/sink/start")
+async def start_sink(body: SinkStart):
+    global _ingest_writer
+    if sink_state["running"]:
+        return _sink_status()
+    if not (1 <= body.port <= 65535):
+        raise HTTPException(400, "Invalid port")
+    await sink_server.start()
+    await sink_server.reset()
+    sink_data["tags"] = {}
+    try:
+        tcp_server = await asyncio.start_server(_handle_ingest, "0.0.0.0", body.port)
+    except Exception as e:  # noqa
+        raise HTTPException(502, f"Could not bind ingest port {body.port}: {e}")
+    _ingest_writer = None
+    sink_state.update(
+        running=True,
+        port=body.port,
+        tcp_server=tcp_server,
+        frames_received=0,
+        bytes_received=0,
+        started_at=time.time(),
+        _win_start=time.time(),
+        _win_frames=0,
+        _win_bytes=0,
+        _last_stats=time.time(),
+        fps=0.0,
+        bps=0.0,
+        last_seq=0,
+    )
+    logger.info(f"Sink ingest listening on 0.0.0.0:{body.port}")
+    await sio.emit("sink_stats", _sink_status())
+    return _sink_status()
+
+
+@api_router.post("/sink/stop")
+async def stop_sink():
+    global _ingest_writer
+    if _ingest_writer:
+        try:
+            _ingest_writer.close()
+        except Exception:
+            pass
+        _ingest_writer = None
+    if sink_state["tcp_server"]:
+        sink_state["tcp_server"].close()
+        try:
+            await sink_state["tcp_server"].wait_closed()
+        except Exception:
+            pass
+    sink_state.update(running=False, tcp_server=None, started_at=None, fps=0.0, bps=0.0)
+    await sio.emit("sink_stats", _sink_status())
+    return _sink_status()
+
+
+# ---------------------------------------------------------------------------
 # Socket.IO events
 # ---------------------------------------------------------------------------
 @sio.event
 async def connect(sid, environ):
     logger.info(f"WS client connected: {sid}")
     await sio.emit("stats", _runtime_status(), to=sid)
+    await sio.emit("sink_stats", _sink_status(), to=sid)
 
 
 @sio.event
@@ -544,9 +766,12 @@ async def on_startup():
 @fastapi_app.on_event("shutdown")
 async def on_shutdown():
     runtime["active"] = False
+    if sink_state["tcp_server"]:
+        sink_state["tcp_server"].close()
     for sid in list(connections.keys()):
         await _disconnect_server(sid)
     await demo_server.stop()
+    await sink_server.stop()
     mongo_client.close()
 
 
