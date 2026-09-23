@@ -15,9 +15,14 @@ logger = logging.getLogger("opcua_sink")
 
 
 def _norm(value):
+    """Preserve OPC UA data-type semantics on the re-published server:
+    bool -> Boolean, int -> Int64, float -> Double, everything else -> String.
+    """
     if isinstance(value, bool):
         return value
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
         return float(value)
     return str(value)
 
@@ -29,6 +34,7 @@ class SinkOPCUAServer:
         self.idx = None
         self.folder = None
         self.nodes = {}  # name -> Variable node
+        self.kinds = {}  # name -> 'bool'|'int'|'float'|'str'
 
     async def start(self):
         if self.server is not None:
@@ -53,19 +59,36 @@ class SinkOPCUAServer:
             except Exception:
                 pass
         self.nodes = {}
+        self.kinds = {}
+
+    def _coerce(self, name, value):
+        kind = self.kinds.get(name)
+        try:
+            if kind == "bool":
+                return bool(value)
+            if kind == "int":
+                return int(round(value)) if isinstance(value, float) else int(value)
+            if kind == "float":
+                return float(value)
+            if kind == "str":
+                return str(value)
+        except Exception:
+            pass
+        return _norm(value)
 
     async def upsert(self, name, value):
         """Create the variable node on first sight, otherwise write the new value.
 
         Returns True if a new node was dynamically created.
         """
-        v = _norm(value)
         if name in self.nodes:
             try:
-                await self.nodes[name].write_value(v)
+                await self.nodes[name].write_value(self._coerce(name, value))
             except Exception as e:  # type drift etc.
                 logger.debug(f"write {name} failed: {e}")
             return False
+        v = _norm(value)
+        self.kinds[name] = "bool" if isinstance(value, bool) else "int" if isinstance(value, int) else "float" if isinstance(value, float) else "str"
         nodeid = ua.NodeId(f"Received.{name}", self.idx)
         var = await self.folder.add_variable(nodeid, ua.QualifiedName(name, self.idx), v)
         self.nodes[name] = var
