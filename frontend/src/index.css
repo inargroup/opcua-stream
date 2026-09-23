@@ -1,0 +1,83 @@
+@import url('https://fonts.googleapis.com/css2?family=Chivo:wght@400;600;700;800;900&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    :root {
+        --background: 240 11% 4%;
+        --foreground: 240 5% 96%;
+        --card: 240 6% 7%;
+        --card-foreground: 240 5% 96%;
+        --popover: 240 4% 10%;
+        --popover-foreground: 240 5% 96%;
+        --primary: 187 100% 50%;
+        --primary-foreground: 240 11% 4%;
+        --secondary: 240 4% 12%;
+        --secondary-foreground: 240 5% 96%;
+        --muted: 240 4% 12%;
+        --muted-foreground: 240 4% 65%;
+        --accent: 240 4% 14%;
+        --accent-foreground: 240 5% 96%;
+        --destructive: 0 72% 51%;
+        --destructive-foreground: 0 0% 98%;
+        --border: 240 4% 16%;
+        --input: 240 4% 16%;
+        --ring: 187 100% 50%;
+        --radius: 0.375rem;
+    }
+}
+
+* {
+    border-color: hsl(var(--border));
+}
+
+body {
+    margin: 0;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+.font-heading { font-family: 'Chivo', sans-serif; }
+.font-mono, code { font-family: 'IBM Plex Mono', monospace; }
+
+::selection {
+    background: hsl(187 100% 50% / 0.3);
+    color: #fff;
+}
+
+.scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: hsl(240 4% 20%); border-radius: 3px; }
+.scrollbar-thin::-webkit-scrollbar-thumb:hover { background: hsl(240 4% 28%); }
+
+.scanlines {
+    background-image: repeating-linear-gradient(
+        0deg,
+        rgba(0, 229, 255, 0.03),
+        rgba(0, 229, 255, 0.03) 1px,
+        transparent 1px,
+        transparent 3px
+    );
+}
+
+.grid-texture {
+    background-image:
+        linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+    background-size: 28px 28px;
+}
+
+@keyframes livepulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+.animate-livepulse { animation: livepulse 1.4s ease-in-out infinite; }
+
+@layer base {
+    [data-debug-wrapper="true"] { display: contents !important; }
+}

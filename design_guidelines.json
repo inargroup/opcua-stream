@@ -1,0 +1,83 @@
+{
+  "theme": "dark",
+  "typography": {
+    "headings": {
+      "family": "Chivo, sans-serif",
+      "usage": "Headers, primary layout titles. Must use tracking-tight or tracking-tighter."
+    },
+    "body": {
+      "family": "Inter, sans-serif",
+      "usage": "Standard UI text, form labels, descriptions."
+    },
+    "data_and_code": {
+      "family": "IBM Plex Mono, monospace",
+      "usage": "Tag names, node IDs, metric values, serial channel output, data tables, sampling rates. MUST use tabular-nums class."
+    }
+  },
+  "colors": {
+    "background": "#09090B",
+    "surface": "#121214",
+    "surface_elevated": "#1A1A1D",
+    "border": "rgba(255, 255, 255, 0.12)",
+    "text_primary": "#F4F4F5",
+    "text_secondary": "#A1A1AA",
+    "primary": "#00E5FF",
+    "status": {
+      "connected": "#10B981",
+      "disconnected": "#EF4444",
+      "warning": "#F59E0B",
+      "transmitting": "#00E5FF"
+    }
+  },
+  "layouts": {
+    "general": "High-density Grid Protocol (Bento Mode B). Utilize h-full to stretch items. Minimal negative space between functional panels. Start with a responsive mobile-first approach, scaling to grid-cols-12 on large screens.",
+    "dashboard_structure": "4-quadrant or multi-pane layout: Left rail for Server/Tag browsing, Top for KPIs, Center for Runtime Dashboard (trends), Bottom/Right for Serial Monitor.",
+    "spacing": "Tight padding (p-4 to p-6) within panels to maximize data density. Use standard Tailwind gaps (gap-4 or gap-6) between cards."
+  },
+  "visual_enhancers": {
+    "borders": "Expose the skeleton. Grid Borders (Technical Look). Use border-collapse style layouts or subtle 1px border-white/10 on panels. Do not rely on heavy drop shadows in this dark theme.",
+    "surfaces": "Flat Solid. NEVER use glassmorphism for data-heavy panels to prevent visual refraction. Use flat muted grays with sharp or max 4px radius (rounded-sm or rounded-md). No completely transparent backgrounds.",
+    "serial_monitor": "Retro-Futurism terminal look. Deep black background (#000000), monospace font, subtle cyan text for active data frames, optional subtle scanline CSS pattern."
+  },
+  "components": {
+    "server_manager": "Shadcn datatable or list component with inline status indicators (connected/disconnected).",
+    "tag_browser": "Hierarchical tree view or multi-level list for Node IDs. Include Shadcn Checkboxes for selection and inputs for sampling interval.",
+    "stats_header": "Cardless metric blocks. Overlines must be uppercase, tiny, wide spacing (tracking-[0.2em]). Large data values.",
+    "charts": "Sparklines inside datatable rows or compact Shadcn/Recharts line charts. Keep charts muted, using primary color only for the trend line itself.",
+    "mode_toggle": "Prominent Shadcn Switch, Tabs, or segmented control in the top navigation bar to switch between 'Configuration' and 'Runtime' modes.",
+    "serial_channel_monitor": "Terminal-like panel. Include toggle for JSON/MessagePack, start/stop button, and auto-scrolling log view for WebSocket data."
+  },
+  "animations": {
+    "micro_interactions": "Subtle -translate-y-[1px] and border brightness increase on hover for interactive elements.",
+    "data_updates": "Do not animate rapid data changes (causes layout thrashing). Rely on tabular-nums.",
+    "serial_stream": "Smooth DOM appending for the terminal. Avoid full re-renders for high-speed WebSocket messages to maintain performance."
+  },
+  "accessibility": {
+    "contrast": "Maintain minimum 4.5:1 ratio. Text secondary on dark background must be #A1A1AA or brighter.",
+    "testing": "All interactive elements, forms, server list items, and tags MUST have data-testid attributes (e.g., data-testid='add-server-button', data-testid='mode-toggle', data-testid='tag-list-item')."
+  },
+  "image_urls": [
+    {
+      "url": "https://images.pexels.com/photos/8108716/pexels-photo-8108716.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "category": "background_texture",
+      "description": "Moody blue circuit board. Use sparingly with high opacity overlay (e.g., bg-zinc-950/90) behind the top navbar or as a subtle empty-state illustration for the Server Manager."
+    }
+  ],
+  "universal_guidelines": [
+    "Design an industrial SCADA-style dark dashboard. It must feel like a command center: high performance, serious, and precise.",
+    "Adhere to ISA-101 high-performance HMI principles: keep the normal state visually quiet/muted (dark grays), and reserve bright colors only for active connections, real-time transmissions, or alarms.",
+    "DO NOT use generic centered layouts or simplistic gradients. Make the UI dense, sharp, and highly functional.",
+    "Create depth using subtle 1px borders and varying shades of dark gray (#09090B to #1A1A1D) instead of heavy shadows.",
+    "Never use AI assistant Emoji characters (🤖🧠💡) in the UI. Use a professional icon library like Lucide React or Phosphor.",
+    "Use tabular-nums for all metrics, KPIs, and high-speed data to prevent horizontal jittering."
+  ],
+  "instructions_to_main_agent": [
+    "CRITICAL: Generate .js files, NOT .tsx files. Follow standard modern React patterns using JavaScript.",
+    "Initialize React app with Tailwind CSS and Shadcn UI primitives.",
+    "Install required fonts (Chivo, IBM Plex Mono, Inter) and apply them via Tailwind config.",
+    "Implement WebSocket hook/logic for the Runtime Mode high-speed serial communication channel. Build a robust simulation/mock for the OPC UA server and WebSocket feed.",
+    "Build 'Configuration Mode' with full CRUD for the Server Manager and a Tag Browser/Selector for defining the source OPC UA servers and tags.",
+    "Build 'Runtime Mode' displaying a live streaming dashboard with KPIs, real-time tag sparklines, throughput counters (msgs/sec, bytes/sec).",
+    "Build a live feed Serial Channel Monitor displaying serialized frames, allowing toggle between JSON and Binary (MessagePack) formats, and a start/stop transmission button."
+  ]
+}
