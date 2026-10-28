@@ -1,0 +1,36 @@
+{
+  "summary": "Tested configuration download/upload end to end (backend + frontend) and re-checked the iteration_5 fixes. Backend: new suite test_config_transfer.py, 21/21 pass. It covers the export shape (no 'password' anywhere) and the export->import->export round trip, which gives identical servers, tags and settings. Replace semantics hold: after an import with 3 of 9 tags, a changed sampling_interval, msgpack, silence 12.5 and sender baud 57600, the state matches the file exactly and is reflected by /tags, /runtime, /sink and /serial/ports. Password handling works: the stored password is kept when id, endpoint and username are unchanged, and a server is listed in password_needed when it is new or its username changed. Validation works: wrong app, version 2, unknown server_id, duplicate (server_id,node_id), duplicate server id, bad baud and bad format all return 400. Missing servers, sampling_interval 5 and silence 5000 return 422, and a malformed body returns 422. State is unchanged after each rejected import. Import returns 409 while the receiver is running and while the runtime is active. Regression: estimate returns 400 for baud 0 and 1234; test_link_health.py (13) and test_serial_sink.py (6) pass with -n 0. The first run hit a transient ConnectTimeout from the ingress and passed on retry. The stale-frame repro now shows frames 0 / tags 0 and line_silent fires correctly, so it is fixed. A backend hot reload with config_imported=true kept the demo server and 9 tags without duplication. Frontend (Playwright): Download saves opcstream-config-YYYYMMDDHHMM.json (1 server, 9 tags, no password) with a toast. An invalid JSON file shows an error toast and no dialog. A valid file opens the dialog with correct counts, and Cancel leaves the 9 tags unchanged. Confirm shows the success toast and the tag list refreshes to 3. Runtime then shows the imported port, baud and msgpack format, and Receiver shows the imported port, baud and 12.5 s silence time. These values persist after a page reload. Upload while the receiver is running or while transmitting shows the toast 'Stop the transmission and the receiver before uploading'. The silence input has max=3600, and entering 5000 shows the specific range toast. The LINK stat shows SILENT while the line_silent banner is active. The original config (demo server, 9 tags, sender /tmp/ttyV0@9600, receiver /tmp/ttyV1@115200, json, 5 s) was restored and verified.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/config/import (format, silence_timeout)", "issue": "runtime.format and sink_state.silence_timeout are only held in memory; they are not saved to app_settings. After a backend restart or hot reload they reset to json/5.0, so the imported format and silence time are lost and the next export no longer matches the uploaded file."},
+      {"endpoint": "POST /api/config/import", "issue": "Duplicate tag ids are not rejected, so two tags with the same id get inserted (only duplicate server ids and (server_id,node_id) pairs are checked). Also, the import is not atomic: delete_many runs before insert, so an insert failure partway through leaves an empty or partial configuration."},
+      {"endpoint": "GET /api/servers, POST /api/servers", "issue": "This is an existing issue, not part of this feature. The responses include the 'password' field in plaintext. Export strips it correctly, but the list API leaks it to any client."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Config import dialog", "issues": ["The dialog does not show which settings will change (ports, baud, format); only server and tag counts are shown. Optional enhancement."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_config_transfer.py", "/app/tests/test_config_transfer.py", "/app/backend/tests/test_link_health.py", "/app/backend/tests/test_serial_sink.py", "/app/backend/tests/repro_stale_frames_on_sink_start.py", "/app/test_reports/pytest/config_transfer_results.xml"],
+  "action_items": [
+    "Save format and silence_timeout in app_settings (and load them on startup) so imported values survive a restart.",
+    "Optional: reject duplicate tag ids on import, and make the replace safer (validate and insert first, or roll back on failure).",
+    "Optional: exclude 'password' from the GET /api/servers and POST /api/servers responses."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now about 1065 lines and should be split (config_transfer, runtime, sink modules).",
+    "In SerialReceiver.start, the drain loop's read(in_waiting or 1) can block for up to the serial timeout past the 300 ms window. This is harmless but worth noting.",
+    "ConfigTransfer only validates in the client that servers and tags are arrays; everything else is left to the backend, and backend detail strings are surfaced in a toast. This is fine."
+  ],
+  "updated_files": ["/app/backend/tests/test_config_transfer.py (new)", "/app/tests/test_config_transfer.py (new, same content)"],
+  "success_rate": {"backend": "100% (40/40 across 3 suites; 1 transient network timeout that passed on retry)", "frontend": "100% of tested flows"},
+  "test_credentials": "No auth",
+  "seed_data_creation": "None left behind. The original config was saved to /tmp/orig_config.json and re-imported at the end. app_settings.config_imported is now true.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run the config suite with: REACT_APP_BACKEND_URL=... python -m pytest backend/tests/test_config_transfer.py -n 0. Its module fixture saves the original config to /tmp/orig_config.json (if not already present) and re-imports it on teardown. Runtime/start and sink/start overwrite the saved serial settings (e.g. sender baud), so re-import the original afterwards. Copying files into backend/ triggers a hot reload, which resets the in-memory format and silence_timeout."
+}

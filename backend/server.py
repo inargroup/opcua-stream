@@ -156,6 +156,10 @@ async def _save_serial_setting(role: str, port: Optional[str], baudrate: int):
     )
 
 
+async def _save_settings(**kv):
+    await db.app_settings.update_one({"id": "serial"}, {"$set": kv}, upsert=True)
+
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -256,7 +260,7 @@ async def root():
 
 @api_router.get("/servers")
 async def list_servers():
-    servers = await db.opcua_servers.find({}, {"_id": 0}).to_list(1000)
+    servers = await db.opcua_servers.find({}, {"_id": 0, "password": 0}).to_list(1000)
     for s in servers:
         s["status"] = _status(s["id"])
         s["tag_count"] = await db.opcua_tags.count_documents({"server_id": s["id"]})
@@ -270,6 +274,7 @@ async def create_server(body: ServerCreate):
     doc["created_at"] = now_iso()
     await db.opcua_servers.insert_one(doc.copy())
     doc.pop("_id", None)
+    doc.pop("password", None)
     doc["status"] = _status(doc["id"])
     doc["tag_count"] = 0
     return doc
@@ -283,7 +288,7 @@ async def update_server(server_id: str, body: ServerUpdate):
     res = await db.opcua_servers.update_one({"id": server_id}, {"$set": updates})
     if res.matched_count == 0:
         raise HTTPException(404, "Server not found")
-    doc = await db.opcua_servers.find_one({"id": server_id}, {"_id": 0})
+    doc = await db.opcua_servers.find_one({"id": server_id}, {"_id": 0, "password": 0})
     doc["status"] = _status(server_id)
     return doc
 
@@ -413,6 +418,7 @@ async def start_runtime(body: RuntimeStart):
     runtime["serial_port"] = body.serial_port
     runtime["baudrate"] = body.baudrate
     runtime["format"] = body.format
+    await _save_settings(format=body.format)
     runtime["active"] = True
     runtime["seq"] = 0
     runtime["frames_total"] = 0
@@ -449,6 +455,7 @@ async def set_format(body: FormatSet):
     if body.format not in ("json", "msgpack"):
         raise HTTPException(400, "Invalid format")
     runtime["format"] = body.format
+    await _save_settings(format=body.format)
     return _runtime_status()
 
 
@@ -786,6 +793,7 @@ async def start_sink(body: SinkStart):
     except Exception as e:  # noqa
         raise HTTPException(409, f"Could not open serial port {body.serial_port}: {e}")
     await _save_serial_setting("receiver", body.serial_port, body.baudrate)
+    await _save_settings(silence_timeout=body.silence_timeout)
     await sink_server.start()
     await sink_server.reset()
     sink_data["tags"] = {}
@@ -819,6 +827,7 @@ async def start_sink(body: SinkStart):
 @api_router.post("/sink/config")
 async def config_sink(body: SinkConfig):
     sink_state["silence_timeout"] = body.silence_timeout
+    await _save_settings(silence_timeout=body.silence_timeout)
     await sio.emit("sink_stats", _sink_status())
     return _sink_status()
 
@@ -916,6 +925,8 @@ async def import_config(body: ConfigFile):
         if (t.server_id, t.node_id) in seen:
             raise HTTPException(400, f"Duplicate tag '{t.name}' for the same server")
         seen.add((t.server_id, t.node_id))
+    if len({t.id for t in body.tags}) != len(body.tags):
+        raise HTTPException(400, "Duplicate tag ids in file")
 
     # keep stored passwords for servers that survive the replace with the same endpoint + user
     old = {o["id"]: o for o in await db.opcua_servers.find({}, {"_id": 0}).to_list(1000)}
@@ -940,7 +951,7 @@ async def import_config(body: ConfigFile):
 
     await db.app_settings.update_one(
         {"id": "serial"},
-        {"$set": {**{k: getattr(s, k) for k in SETTING_KEYS}, "config_imported": True}},
+        {"$set": {**{k: getattr(s, k) for k in SETTING_KEYS}, "format": s.format, "silence_timeout": s.silence_timeout, "config_imported": True}},
         upsert=True,
     )
     runtime["format"] = s.format
@@ -1032,6 +1043,9 @@ async def on_startup():
     except Exception as e:  # noqa
         logger.error(f"Failed to start demo OPC UA server: {e}")
     await _seed_demo()
+    st = await db.app_settings.find_one({"id": "serial"}) or {}
+    runtime["format"] = st.get("format", runtime["format"])
+    sink_state["silence_timeout"] = st.get("silence_timeout", sink_state["silence_timeout"])
     # auto-connect the built-in demo server for instant runtime
     cfg = await db.opcua_servers.find_one({"id": DEMO_SERVER_ID}, {"_id": 0})
     if cfg:

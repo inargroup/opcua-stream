@@ -39,6 +39,13 @@ An OPC UA client that connects to multiple OPC UA servers. Users define source s
 - Pi deliverables: `scripts/raspberry-pi/install.sh` (venv, yarn build, Mongo via Docker 4.4.18/7, dialout, systemd + nginx), `virtual-serial-pair.sh` (socat bench test), README.
 - Tested iteration_4: backend 6/6 (`backend/tests/test_serial_sink.py`), frontend flows pass; fixed StrictMode double socket, 502→409, false early dormancy, reset-before-validate.
 
+## Implemented — Link Health, Speed Advisor, Config File (2026-06)
+- Receiver alarm banner (`link-alarm-banner`): `line_silent` (configurable silence time 0.5–3600 s, live via `POST /api/sink/config`; suppressed after a clean Sender stop), `crc_errors` (any CRC error in last 10 s), `link_lost`. LINK stat shows OK/SILENT/NOISY/LOST.
+- Sender Speed Advisor: `GET /api/runtime/estimate?format&baudrate` simulates 10 s of the scheduler → load %, ok/tight/overloaded, suggested baud (≤70 % load); one-click apply. Warn only, never blocks.
+- Config download/upload: `GET /api/config/export`, `POST /api/config/import` (replace-all; servers, tags, serial ports/baud, format, silence time; passwords never exported, kept when id+endpoint+username unchanged, otherwise listed in `password_needed`). Blocked (409) while transmitting/receiving. Demo seed skipped after an import. Format + silence time persisted in `app_settings`.
+- Fixes: receiver drains 300 ms on open (stale frames); estimate validates baud; `/api/servers` no longer returns passwords.
+- Tested: iteration_5 (19/19), iteration_6 (21/21 + frontend).
+
 ## Test Status
 - Backend: 9/9 pytest pass (CRUD, browse, runtime, Socket.IO connect/stats/frames, json vs msgpack size). `/app/backend/tests/backend_test.py`.
 - Frontend: 100% (iteration_2) — runtime streaming, tiles, terminal, format toggle, stop/restart all verified on live URL.
@@ -48,7 +55,7 @@ An OPC UA client that connects to multiple OPC UA servers. Users define source s
 - P1: Optional RS-485 half-duplex (DE/RE pin) support.
 - P1: Add `data-testid` to individual KPI values (frames-tx, data-rate, uptime) for automation robustness.
 - P1: Historical trend view / multi-tag chart overlay.
-- P2: Export/import full configuration (servers + tags) as JSON.
+
 - P2: Alarms/thresholds per tag with visual alerting.
 - P2: Migrate FastAPI `on_event` startup/shutdown to lifespan handlers.
 - P2: Persist runtime stats / recording to MongoDB for playback.
