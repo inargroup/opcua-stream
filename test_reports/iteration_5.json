@@ -1,0 +1,41 @@
+{
+  "summary": "Tested the Link Health Alarm and the Speed Advisor over the socat pair /tmp/ttyV0 <-> /tmp/ttyV1. Backend: new suite test_link_health.py (13 tests) plus the regression suite test_serial_sink.py (6 tests): 19/19 pass. Speed advisor estimate: 9600 JSON is overloaded at 152% and suggests 38400. 115200 is ok for both formats with suggested null. MessagePack is smaller than JSON. Bad format returns 400. The estimate is within 1-2% of the measured runtime bps for both JSON and MessagePack. silence_timeout: validation (0, 0.4 and 4000 -> 422), default 5, and live /sink/config all work. Alarms: line_silent (critical) appears after the timeout and clears when data resumes. There is no silent alarm after a clean Sender stop. crc_errors (warning) appears after an injected corrupt frame and clears after about 10.5s. Regression: dormant/revive over msgpack and json, tag_count stays 9. Frontend (Playwright): the Speed Advisor shows LINK OK / TIGHT (19200: 80%) / OVERLOADED (9600: 161% JSON, 103% Binary). The apply button sets the baud to 38400 and the advisor turns LINK OK. Format toggle updates the estimate. Start is allowed while overloaded, and the baud select and apply button are disabled while running. Receiver: the silence input applies on Enter and on blur with a toast. Values below 0.5 get a validation toast. The link-alarm-line_silent and link-alarm-crc_errors banners (role=alert) appear and clear in real time. Streaming shows 9 tiles, and a clean stop leaves 9 DORMANT tiles with no alarm. link_lost was NOT tested (hard to simulate).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/sink/start + _sink_consumer clean_stop", "issue": "Stale frames are ingested on Receiver start. If the Sender ran while the Receiver was stopped, socat (and potentially a USB-serial adapter or OS buffer) holds those frames, and ser.reset_input_buffer() does not clear them. The new Receiver session then ingests old data frames plus the old 'stop' control frame. This creates phantom dormant tags (8 in the repro) and sets clean_stop=True, so the line_silent alarm is suppressed indefinitely on a silent line. Repro: backend/tests/repro_stale_frames_on_sink_start.py. Suggested fix: discard frames received in the first ~300ms after open, or ignore frames whose 'ts' is older than sink started_at, or never let a control frame set clean_stop before at least one data frame has been seen in this session."},
+      {"endpoint": "GET /api/runtime/estimate", "issue": "baudrate is not validated. baudrate=0 returns status 'ok' with load 0 and capacity 0; any value such as 1234 is accepted. Return 400 for values not in BAUD_RATES, like /runtime/start does."},
+      {"endpoint": "_sink_alarms line_silent", "issue": "Corrupt/garbage bytes do not reset last_rx, so line_silent still fires while noise arrives. This is arguably correct, but the message 'No data' may mislead when the CRC alarm is also active."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Receiver silence timeout > 3600", "issue": "Entering 5000 shows the generic toast 'Could not update silence alarm'. The backend returns 422; there is no client-side max check and the input has no max attribute. Add max=3600 and a specific message.", "affected_selectors": ["receiver-silence-timeout-input"]}
+    ],
+    "design_issues": [
+      {"screen": "Receiver stats", "issues": ["The LINK stat tile shows 'OK' (cyan) while the critical SERIAL LINE SILENT banner is shown. Consider reflecting the alarm state (e.g. SILENT/red)."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_link_health.py", "/app/backend/tests/test_serial_sink.py", "/app/backend/tests/repro_stale_frames_on_sink_start.py", "/app/backend/tests/inject_corrupt_frame.py", "/app/test_reports/pytest/link_health_results.xml"],
+  "action_items": [
+    "Prevent stale buffered frames (especially an old 'stop' control frame) from latching clean_stop and creating phantom tags at Receiver start.",
+    "Validate baudrate in GET /api/runtime/estimate (400 if not in BAUD_RATES).",
+    "Add max=3600 plus a clear message for the silence input; optionally show the LINK tile as SILENT while line_silent is active."
+  ],
+  "critical_code_review_comments": [
+    "The clean_stop flag stays latched until the next decoded frame. This is by design, but combined with stale buffers it hides real silence (see the minor issue above).",
+    "SpeedAdvisor swallows estimate errors (.catch(() => {})) and renders nothing. No error or loading state is shown.",
+    "The estimate uses runtime.last_values, so its result changes after the first transmission (1461 -> 1545 B/s for JSON). This is fine but worth noting.",
+    "server.py is ~935 lines and should be split (runtime/sink/estimate modules).",
+    "uvicorn --reload watches /app/backend including tests/, so creating any file in backend/tests wipes in-memory sink state."
+  ],
+  "updated_files": ["/app/backend/tests/test_link_health.py (new)", "/app/backend/tests/test_serial_sink.py (accept 409 for unopenable port, since the code now returns 409)", "/app/backend/tests/repro_stale_frames_on_sink_start.py (new)", "/app/backend/tests/inject_corrupt_frame.py (new)"],
+  "success_rate": {"backend": "100% (19/19 after draining the stale buffer in the test; 1 real edge-case bug documented)", "frontend": "100% of tested flows"},
+  "test_credentials": "No auth",
+  "seed_data_creation": "None. The Receiver is left running on /tmp/ttyV1 with silence_timeout 5; the runtime is stopped.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run with: pytest backend/tests/test_link_health.py backend/tests/test_serial_sink.py -n 0 (pytest.ini adds xdist; parallel runs break the shared serial state). Inject a CRC error with: python backend/tests/inject_corrupt_frame.py (it sleeps 9s first). Do not create files in backend/ while the sink is running, because hot reload resets it.",
+  "rca of the issue": "Line_silent missing after Receiver start: the Sender wrote frames to /tmp/ttyV0 while no one was reading /tmp/ttyV1. socat buffered them in user space, so reset_input_buffer() on ttyV1 does not discard them. On open, the Receiver decodes 6 old frames and then the old {ctl: stop}, and _sink_consumer sets clean_stop=True. _sink_alarms then skips line_silent forever. Mitigation: ignore data/control frames until the line has been quiet for a short window after open, or compare frame ts to started_at."
+}

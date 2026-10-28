@@ -461,6 +461,8 @@ async def estimate_link(format: str = "json", baudrate: int = 115200):
     """Simulate 10s of the transmission scheduler to estimate serial load for the configured tags."""
     if format not in ("json", "msgpack"):
         raise HTTPException(400, "Invalid format")
+    if baudrate not in BAUD_RATES:
+        raise HTTPException(400, "Unsupported baud rate")
     tags = await db.opcua_tags.find({}, {"_id": 0}).to_list(2000)
     last = runtime["last_values"]
     ticks = int(10 / TICK_S)
@@ -717,14 +719,14 @@ async def _sink_consumer(q: asyncio.Queue):
     while True:
         fmt, payload, size = await q.get()
         sink_state["last_rx"] = time.time()
-        sink_state["clean_stop"] = False
         try:
             if fmt == "control":
-                if json.loads(payload).get("ctl") == "stop":
+                if json.loads(payload).get("ctl") == "stop" and sink_state["frames_received"]:
                     sink_state["clean_stop"] = True
                     await _mark_dormant([n for n, r in sink_data["tags"].items() if r["state"] == "active"])
                 continue
             core = json.loads(payload) if fmt == "json" else msgpack.unpackb(payload, raw=False)
+            sink_state["clean_stop"] = False
             await _process_received(core, fmt, size)
         except Exception as e:  # noqa
             logger.warning(f"serial frame decode failed: {e}")
@@ -834,6 +836,131 @@ async def stop_sink():
 
 
 # ---------------------------------------------------------------------------
+# Configuration download / upload (passwords are never exported)
+# ---------------------------------------------------------------------------
+CONFIG_APP = "opc-stream"
+CONFIG_VERSION = 1
+SETTING_KEYS = ("sender_port", "sender_baudrate", "receiver_port", "receiver_baudrate")
+
+
+class ConfigServer(BaseModel):
+    id: str
+    name: str
+    endpoint: str
+    security_policy: str = "None"
+    username: Optional[str] = None
+
+
+class ConfigTag(BaseModel):
+    id: str
+    server_id: str
+    node_id: str
+    name: str
+    data_type: str = "Unknown"
+    unit: Optional[str] = None
+    sampling_interval: int = Field(200, ge=20, le=3_600_000)
+
+
+class ConfigSettings(BaseModel):
+    format: str = "json"
+    silence_timeout: float = Field(5.0, ge=0.5, le=3600)
+    sender_port: Optional[str] = None
+    sender_baudrate: int = 115200
+    receiver_port: Optional[str] = None
+    receiver_baudrate: int = 115200
+
+
+class ConfigFile(BaseModel):
+    app: str
+    version: int
+    servers: List[ConfigServer]
+    tags: List[ConfigTag]
+    settings: ConfigSettings = ConfigSettings()
+
+
+@api_router.get("/config/export")
+async def export_config():
+    servers = await db.opcua_servers.find({}, {"_id": 0, "password": 0, "created_at": 0}).to_list(1000)
+    tags = await db.opcua_tags.find({}, {"_id": 0, "created_at": 0}).to_list(5000)
+    st = await db.app_settings.find_one({"id": "serial"}, {"_id": 0}) or {}
+    settings = {k: st.get(k) for k in SETTING_KEYS if st.get(k) is not None}
+    settings.update(format=runtime["format"], silence_timeout=sink_state["silence_timeout"])
+    return {
+        "app": CONFIG_APP,
+        "version": CONFIG_VERSION,
+        "exported_at": now_iso(),
+        "servers": [ConfigServer(**s).model_dump() for s in servers],
+        "tags": [ConfigTag(**t).model_dump() for t in tags],
+        "settings": ConfigSettings(**settings).model_dump(),
+    }
+
+
+@api_router.post("/config/import")
+async def import_config(body: ConfigFile):
+    if body.app != CONFIG_APP or body.version > CONFIG_VERSION:
+        raise HTTPException(400, "Not an OPC//STREAM configuration file (or a newer version)")
+    if runtime["active"] or sink_state["running"]:
+        raise HTTPException(409, "Stop the transmission and the receiver before uploading a configuration")
+    s = body.settings
+    if s.format not in ("json", "msgpack"):
+        raise HTTPException(400, "Invalid format in settings")
+    if s.sender_baudrate not in BAUD_RATES or s.receiver_baudrate not in BAUD_RATES:
+        raise HTTPException(400, "Unsupported baud rate in settings")
+    server_ids = [srv.id for srv in body.servers]
+    if len(set(server_ids)) != len(server_ids):
+        raise HTTPException(400, "Duplicate server ids in file")
+    seen = set()
+    for t in body.tags:
+        if t.server_id not in server_ids:
+            raise HTTPException(400, f"Tag '{t.name}' refers to an unknown server")
+        if (t.server_id, t.node_id) in seen:
+            raise HTTPException(400, f"Duplicate tag '{t.name}' for the same server")
+        seen.add((t.server_id, t.node_id))
+
+    # keep stored passwords for servers that survive the replace with the same endpoint + user
+    old = {o["id"]: o for o in await db.opcua_servers.find({}, {"_id": 0}).to_list(1000)}
+    for sid in list(connections.keys()):
+        await _disconnect_server(sid)
+    connections.clear()
+    await db.opcua_tags.delete_many({})
+    await db.opcua_servers.delete_many({})
+
+    password_needed = []
+    for srv in body.servers:
+        doc = srv.model_dump()
+        prev = old.get(srv.id)
+        same = prev and prev.get("endpoint") == srv.endpoint and prev.get("username") == srv.username
+        doc["password"] = prev.get("password") if same else None
+        doc["created_at"] = now_iso()
+        if srv.username and not doc["password"]:
+            password_needed.append(srv.name)
+        await db.opcua_servers.insert_one(doc)
+    if body.tags:
+        await db.opcua_tags.insert_many([{**t.model_dump(), "created_at": now_iso()} for t in body.tags])
+
+    await db.app_settings.update_one(
+        {"id": "serial"},
+        {"$set": {**{k: getattr(s, k) for k in SETTING_KEYS}, "config_imported": True}},
+        upsert=True,
+    )
+    runtime["format"] = s.format
+    sink_state["silence_timeout"] = s.silence_timeout
+
+    connected = 0
+    for srv in await db.opcua_servers.find({}, {"_id": 0}).to_list(1000):
+        if (await _connect_server(srv)).get("connected"):
+            connected += 1
+    logger.info(f"Configuration imported: {len(body.servers)} servers, {len(body.tags)} tags")
+    return {
+        "servers": len(body.servers),
+        "tags": len(body.tags),
+        "connected": connected,
+        "password_needed": password_needed,
+        "settings": s.model_dump(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Socket.IO events
 # ---------------------------------------------------------------------------
 @sio.event
@@ -852,6 +979,9 @@ async def disconnect(sid):
 # Lifecycle
 # ---------------------------------------------------------------------------
 async def _seed_demo():
+    settings = await db.app_settings.find_one({"id": "serial"}) or {}
+    if settings.get("config_imported"):
+        return
     existing = await db.opcua_servers.find_one({"id": DEMO_SERVER_ID})
     if not existing:
         await db.opcua_servers.insert_one(

@@ -34,4 +34,6 @@ export const startSink = (serial_port, baudrate, silence_timeout) =>
 export const configSink = (silence_timeout) => http.post("/sink/config", { silence_timeout }).then((r) => r.data);
 export const estimateLink = (format, baudrate) => http.get("/runtime/estimate", { params: { format, baudrate } }).then((r) => r.data);
 export const getSerialPorts = () => http.get("/serial/ports").then((r) => r.data);
+export const exportConfig = () => http.get("/config/export").then((r) => r.data);
+export const importConfig = (cfg) => http.post("/config/import", cfg).then((r) => r.data);
 export const stopSink = () => http.post("/sink/stop").then((r) => r.data);

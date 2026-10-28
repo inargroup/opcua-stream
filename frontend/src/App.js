@@ -9,6 +9,7 @@ import TagBrowser from "@/components/opcua/TagBrowser";
 import RuntimeDashboard from "@/components/opcua/RuntimeDashboard";
 import SerialMonitor from "@/components/opcua/SerialMonitor";
 import ReceiverView from "@/components/opcua/ReceiverView";
+import ConfigTransfer from "@/components/opcua/ConfigTransfer";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 
@@ -281,8 +282,8 @@ export default function App() {
     };
     const handleApplySilence = async () => {
         const v = Number(silenceTimeout);
-        if (!(v >= 0.5)) {
-            toast.error("Silence alarm time must be at least 0.5 s");
+        if (!(v >= 0.5 && v <= 3600)) {
+            toast.error("Silence alarm time must be between 0.5 and 3600 s");
             return;
         }
         if (!sinkStats.running || v === sinkStats.silence_timeout) return;
@@ -292,6 +293,15 @@ export default function App() {
         } catch (e) {
             toast.error("Could not update silence alarm");
         }
+    };
+    const handleImported = async (st) => {
+        setFormatState(st.format);
+        setSilenceTimeout(st.silence_timeout);
+        setTxPort(st.sender_port || "");
+        setTxBaud(st.sender_baudrate);
+        setRxPort(st.receiver_port || "");
+        setRxBaud(st.receiver_baudrate);
+        await Promise.all([refreshServers(), refreshTags()]);
     };
     const handleStartSource = async () => {
         if (!txPort.trim()) {
@@ -307,6 +317,8 @@ export default function App() {
             <StatsBar mode={mode} setMode={setMode} servers={servers} tags={tags} stats={stats} wsConnected={wsConnected} />
             <main className="px-4 md:px-6 pb-10 max-w-[1600px] mx-auto">
                 {mode === "config" && (
+                    <>
+                    <ConfigTransfer busy={stats.active || sinkStats.running} onImported={handleImported} />
                     <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
                         <div className="lg:col-span-4">
                             <ServerManager servers={servers} refreshServers={refreshServers} refreshTags={refreshTags} />
@@ -315,6 +327,7 @@ export default function App() {
                             <TagBrowser servers={servers} tags={tags} refreshTags={refreshTags} />
                         </div>
                     </div>
+                    </>
                 )}
                 {mode === "runtime" && (
                     <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">

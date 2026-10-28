@@ -180,6 +180,9 @@ class SerialReceiver(_Link):
         self.open()
         try:
             self.ser.reset_input_buffer()
+            end = time.time() + 0.3
+            while time.time() < end:
+                self.ser.read(self.ser.in_waiting or 1)
         except Exception:
             pass
         self._thread = threading.Thread(target=self._run, daemon=True)

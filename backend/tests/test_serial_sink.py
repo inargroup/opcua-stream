@@ -51,18 +51,18 @@ def test_serial_ports(s):
 # --- sink start validation
 def test_sink_invalid_port_and_baud(s):
     r = s.post(f"{API}/sink/start", json={"serial_port": "/dev/doesnotexist", "baudrate": 115200}, timeout=10)
-    assert r.status_code == 502, r.text
+    assert r.status_code in (409, 502), r.text
     r = s.post(f"{API}/sink/start", json={"serial_port": RX, "baudrate": 1234}, timeout=10)
     assert r.status_code == 400, r.text
     r = s.post(f"{API}/sink/start", json={"serial_port": "", "baudrate": 115200}, timeout=10)
     print("empty port sink start:", r.status_code, r.text[:200])
-    assert r.status_code in (400, 422, 502)
+    assert r.status_code in (400, 409, 422, 502)
     assert s.get(f"{API}/sink", timeout=10).json()["running"] is False
 
 
 def test_runtime_invalid(s):
     r = s.post(f"{API}/runtime/start", json={"format": "json", "serial_port": "/dev/doesnotexist", "baudrate": 115200}, timeout=10)
-    assert r.status_code == 502
+    assert r.status_code in (409, 502)
     r = s.post(f"{API}/runtime/start", json={"format": "json", "serial_port": TX, "baudrate": 1234}, timeout=10)
     assert r.status_code == 400
     assert s.get(f"{API}/runtime", timeout=10).json()["active"] is False

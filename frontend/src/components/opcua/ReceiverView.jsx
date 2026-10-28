@@ -125,6 +125,8 @@ export default function ReceiverView({
 }) {
     const termRef = useRef(null);
     const running = sinkStats.running;
+    const alarmCodes = (sinkStats.alarms || []).map((a) => a.code);
+    const linkLabel = !sinkStats.serial_connected || alarmCodes.includes("link_lost") ? "LOST" : alarmCodes.includes("line_silent") ? "SILENT" : alarmCodes.includes("crc_errors") ? "NOISY" : "OK";
 
     useEffect(() => {
         if (termRef.current) termRef.current.scrollTop = termRef.current.scrollHeight;
@@ -180,6 +182,7 @@ export default function ReceiverView({
                             <input
                                 type="number"
                                 min="0.5"
+                                max="3600"
                                 step="0.5"
                                 value={silenceTimeout}
                                 onChange={(e) => setSilenceTimeout(e.target.value)}
@@ -240,7 +243,7 @@ export default function ReceiverView({
                         <Stat label="Uptime" value={`${sinkStats.uptime || 0}s`} />
                         <Stat label="Dormant" value={sinkStats.dormant_count || 0} />
                         <Stat label="CRC Errors" value={sinkStats.crc_errors || 0} />
-                        <Stat label="Link" value={running ? (sinkStats.serial_connected ? "OK" : "LOST") : "—"} accent={running && sinkStats.serial_connected} />
+                        <Stat label="Link" value={running ? linkLabel : "—"} accent={running && linkLabel === "OK"} />
                     </div>
                 </div>
 
