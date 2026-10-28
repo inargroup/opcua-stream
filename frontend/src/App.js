@@ -49,6 +49,7 @@ export default function App() {
     const [txBaud, setTxBaud] = useState(115200);
     const [rxPort, setRxPort] = useState("");
     const [rxBaud, setRxBaud] = useState(115200);
+    const [silenceTimeout, setSilenceTimeout] = useState(5);
 
     const valuesRef = useRef({});
     const historyRef = useRef({});
@@ -105,6 +106,7 @@ export default function App() {
         }).catch(() => {});
         api.getSink().then((s) => {
             setSinkStats(s);
+            if (s.silence_timeout) setSilenceTimeout(s.silence_timeout);
             if (s.running) {
                 setRxPort(s.serial_port);
                 setRxBaud(s.baudrate);
@@ -258,7 +260,7 @@ export default function App() {
             return;
         }
         try {
-            const s = await api.startSink(rxPort.trim(), rxBaud);
+            const s = await api.startSink(rxPort.trim(), rxBaud, Number(silenceTimeout) || 5);
             sinkValuesRef.current = {};
             sinkHistoryRef.current = {};
             sinkFramesRef.current = [];
@@ -276,6 +278,20 @@ export default function App() {
         const s = await api.stopSink();
         setSinkStats(s);
         toast("Receiver stopped");
+    };
+    const handleApplySilence = async () => {
+        const v = Number(silenceTimeout);
+        if (!(v >= 0.5)) {
+            toast.error("Silence alarm time must be at least 0.5 s");
+            return;
+        }
+        if (!sinkStats.running || v === sinkStats.silence_timeout) return;
+        try {
+            setSinkStats(await api.configSink(v));
+            toast.success(`Silence alarm set to ${v}s`);
+        } catch (e) {
+            toast.error("Could not update silence alarm");
+        }
     };
     const handleStartSource = async () => {
         if (!txPort.trim()) {
@@ -313,7 +329,7 @@ export default function App() {
                                 onStop={handleStop}
                                 onFormat={handleFormat}
                                 frameLog={frameLog}
-                                serial={{ port: txPort, setPort: setTxPort, baud: txBaud, setBaud: setTxBaud, ports, bauds, onRefresh: () => refreshPorts() }}
+                                serial={{ port: txPort, setPort: setTxPort, baud: txBaud, setBaud: setTxBaud, ports, bauds, tagCount: tags.length, onRefresh: () => refreshPorts() }}
                             />
                         </div>
                     </div>
@@ -325,6 +341,9 @@ export default function App() {
                         sinkHistory={sinkHistory}
                         sinkFrameLog={sinkFrameLog}
                         serial={{ port: rxPort, setPort: setRxPort, baud: rxBaud, setBaud: setRxBaud, ports, bauds, onRefresh: () => refreshPorts() }}
+                        silenceTimeout={silenceTimeout}
+                        setSilenceTimeout={setSilenceTimeout}
+                        onApplySilence={handleApplySilence}
                         onStart={handleSinkStart}
                         onStop={handleSinkStop}
                         runtimeActive={stats.active}

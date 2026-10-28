@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Play, Square, Braces, Binary, Radio } from "lucide-react";
 import SerialPortPicker from "@/components/opcua/SerialPortPicker";
+import SpeedAdvisor from "@/components/opcua/SpeedAdvisor";
 
 const fmtBytes = (b) => {
     if (b > 1048576) return `${(b / 1048576).toFixed(2)} MB`;
@@ -72,6 +73,7 @@ export default function SerialMonitor({ stats, format, onStart, onStop, onFormat
                 </div>
 
                 <SerialPortPicker prefix="sender" label="Output Serial Port (to Receiver)" placeholder="/dev/serial0 — leave empty for local only" disabled={stats.active} {...serial} />
+                <SpeedAdvisor format={format} baud={serial.baud} setBaud={serial.setBaud} tagCount={serial.tagCount} disabled={stats.active} />
                 {stats.active && (
                     <div className="flex items-center justify-between rounded-md border border-border bg-background px-3 py-1.5 font-mono text-[10px]" data-testid="sender-serial-status">
                         <span className={stats.serial_port ? (stats.serial_connected ? "text-emerald-400" : "text-red-400") : "text-muted-foreground"}>

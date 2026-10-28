@@ -65,6 +65,7 @@ runtime = {
     "serial_port": None,
     "baudrate": None,
     "link": None,
+    "last_values": {},
 }
 DORMANT_AFTER = 3.0  # min seconds of silence (or 3x the tag's sampling interval) before a tag is flagged dormant
 
@@ -86,7 +87,13 @@ sink_state = {
     "fps": 0.0,
     "bps": 0.0,
     "last_seq": 0,
+    "silence_timeout": 5.0,
+    "last_rx": 0.0,
+    "clean_stop": False,
+    "_crc_seen": 0,
+    "_crc_events": None,
 }
+CRC_WINDOW = 10.0
 sink_data = {"tags": {}}  # name -> {name,value,quality,state,sample_count,first_seen,last_update}
 
 
@@ -136,6 +143,11 @@ class FormatSet(BaseModel):
 class SinkStart(BaseModel):
     serial_port: str
     baudrate: int = 115200
+    silence_timeout: float = Field(5.0, ge=0.5, le=3600)
+
+
+class SinkConfig(BaseModel):
+    silence_timeout: float = Field(ge=0.5, le=3600)
 
 
 async def _save_serial_setting(role: str, port: Optional[str], baudrate: int):
@@ -440,6 +452,54 @@ async def set_format(body: FormatSet):
     return _runtime_status()
 
 
+FRAME_OVERHEAD = 11  # SYNC + fmt + len + CRC32
+TICK_S = 0.05
+
+
+@api_router.get("/runtime/estimate")
+async def estimate_link(format: str = "json", baudrate: int = 115200):
+    """Simulate 10s of the transmission scheduler to estimate serial load for the configured tags."""
+    if format not in ("json", "msgpack"):
+        raise HTTPException(400, "Invalid format")
+    tags = await db.opcua_tags.find({}, {"_id": 0}).to_list(2000)
+    last = runtime["last_values"]
+    ticks = int(10 / TICK_S)
+    nexts = {t["id"]: 0 for t in tags}
+    total = frames = 0
+    for k in range(ticks):
+        now = k * TICK_S
+        due = [t for t in tags if now + 1e-9 >= nexts[t["id"]]]
+        if not due:
+            continue
+        for t in due:
+            step = max(round(max(t.get("sampling_interval", 200), 20) / 1000 / TICK_S), 1) * TICK_S
+            nexts[t["id"]] = now + step
+        core = {
+            "seq": 100000 + k,
+            "ts": now_iso(),
+            "samples": [{"n": t["name"], "v": last.get(t["name"], 1234.5678), "q": 192, "i": t.get("sampling_interval", 200)} for t in due],
+        }
+        packed = json.dumps(core, default=str).encode() if format == "json" else msgpack.packb(core, default=str, use_bin_type=True)
+        total += len(packed) + FRAME_OVERHEAD
+        frames += 1
+    bps = total / 10
+    capacity = lambda b: b / 10  # 8N1: 10 bits per byte
+    load = bps / capacity(baudrate) * 100 if baudrate else 0
+    suggested = next((b for b in BAUD_RATES if bps / capacity(b) <= 0.7), None)
+    status = "ok" if load <= 70 else "tight" if load <= 100 else "overloaded"
+    return {
+        "format": format,
+        "baudrate": baudrate,
+        "tag_count": len(tags),
+        "frames_per_s": round(frames / 10, 1),
+        "est_bytes_per_s": round(bps, 1),
+        "capacity_bytes_per_s": round(capacity(baudrate), 1),
+        "load_percent": round(load, 1),
+        "status": status,
+        "suggested_baudrate": suggested if status != "ok" else None,
+    }
+
+
 async def _read_tag_value(tag: dict):
     conn = connections.get(tag["server_id"])
     if not conn or not conn.get("connected"):
@@ -480,6 +540,8 @@ async def _transmission_loop():
             if loop_start - tag["_last"] >= interval_s:
                 val, quality = await _read_tag_value(tag)
                 tag["_last"] = loop_start
+                if val is not None:
+                    runtime["last_values"][tag["name"]] = val
                 due_samples.append(
                     {
                         "tag_id": tag["id"],
@@ -572,7 +634,27 @@ def _sink_status():
         "dormant_count": sum(1 for r in tags if r["state"] == "dormant"),
         "last_seq": sink_state["last_seq"],
         "uptime": round(uptime, 1),
+        "silence_timeout": sink_state["silence_timeout"],
+        "alarms": _sink_alarms(),
     }
+
+
+def _sink_alarms():
+    if not sink_state["running"]:
+        return []
+    now = time.time()
+    link = sink_state["link"]
+    alarms = []
+    if link and link.error:
+        alarms.append({"code": "link_lost", "severity": "critical", "message": f"Serial port {sink_state['serial_port']} unavailable: {link.error}"})
+    silent_for = now - sink_state["last_rx"]
+    if not sink_state["clean_stop"] and silent_for > sink_state["silence_timeout"]:
+        alarms.append({"code": "line_silent", "severity": "critical", "message": f"No data on {sink_state['serial_port']} for {silent_for:.0f}s (limit {sink_state['silence_timeout']:g}s) — check cable, baud rate and Sender", "since": round(silent_for, 1)})
+    events = sink_state["_crc_events"] or []
+    recent = sum(n for t, n in events if now - t <= CRC_WINDOW)
+    if recent:
+        alarms.append({"code": "crc_errors", "severity": "warning", "message": f"{recent} checksum error(s) in the last {CRC_WINDOW:g}s — possible noise, loose wiring or baud mismatch", "count": recent})
+    return alarms
 
 
 async def _mark_dormant(names):
@@ -634,9 +716,12 @@ async def _process_received(core: dict, fmt: str, size: int):
 async def _sink_consumer(q: asyncio.Queue):
     while True:
         fmt, payload, size = await q.get()
+        sink_state["last_rx"] = time.time()
+        sink_state["clean_stop"] = False
         try:
             if fmt == "control":
                 if json.loads(payload).get("ctl") == "stop":
+                    sink_state["clean_stop"] = True
                     await _mark_dormant([n for n, r in sink_data["tags"].items() if r["state"] == "active"])
                 continue
             core = json.loads(payload) if fmt == "json" else msgpack.unpackb(payload, raw=False)
@@ -651,6 +736,11 @@ async def _sink_monitor():
         now = time.time()
         stale = [n for n, r in sink_data["tags"].items() if r["state"] == "active" and now - r.get("_rx", now) > max(DORMANT_AFTER, 3 * r.get("_interval", 0))]
         await _mark_dormant(stale)
+        link = sink_state["link"]
+        if link and link.decoder.crc_errors > sink_state["_crc_seen"]:
+            sink_state["_crc_events"].append((now, link.decoder.crc_errors - sink_state["_crc_seen"]))
+            sink_state["_crc_seen"] = link.decoder.crc_errors
+        sink_state["_crc_events"] = [e for e in sink_state["_crc_events"] if now - e[0] <= CRC_WINDOW]
         win = now - sink_state["_win_start"]
         if win > 0:
             sink_state["fps"] = sink_state["_win_frames"] / win
@@ -713,8 +803,20 @@ async def start_sink(body: SinkStart):
         fps=0.0,
         bps=0.0,
         last_seq=0,
+        silence_timeout=body.silence_timeout,
+        last_rx=time.time(),
+        clean_stop=False,
+        _crc_seen=0,
+        _crc_events=[],
     )
     logger.info(f"Sink listening on serial {body.serial_port} @ {body.baudrate}")
+    await sio.emit("sink_stats", _sink_status())
+    return _sink_status()
+
+
+@api_router.post("/sink/config")
+async def config_sink(body: SinkConfig):
+    sink_state["silence_timeout"] = body.silence_timeout
     await sio.emit("sink_stats", _sink_status())
     return _sink_status()
 

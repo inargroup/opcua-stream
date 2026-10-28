@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { LineChart, Line, YAxis, ResponsiveContainer } from "recharts";
 import { Inbox, Square, Power, PlugZap, Sparkles, ArrowDownToLine, Moon, RotateCcw } from "lucide-react";
 import SerialPortPicker from "@/components/opcua/SerialPortPicker";
+import LinkAlarmBanner from "@/components/opcua/LinkAlarmBanner";
 
 const fmtBytes = (b) => {
     if (b > 1048576) return `${(b / 1048576).toFixed(2)} MB`;
@@ -114,6 +115,9 @@ export default function ReceiverView({
     sinkHistory,
     sinkFrameLog,
     serial,
+    silenceTimeout,
+    setSilenceTimeout,
+    onApplySilence,
     onStart,
     onStop,
     runtimeActive,
@@ -127,6 +131,8 @@ export default function ReceiverView({
     }, [sinkFrameLog]);
 
     return (
+        <>
+        <LinkAlarmBanner alarms={sinkStats.alarms} />
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
             {/* Dynamic received tags */}
             <section className="lg:col-span-8 rounded-md border border-border bg-card" data-testid="receiver-dashboard">
@@ -169,6 +175,21 @@ export default function ReceiverView({
                 <div className="px-4 py-3 border-b border-border space-y-3">
                     <div className="space-y-2">
                         <SerialPortPicker prefix="receiver" label="Input Serial Port (from Sender)" placeholder="/dev/serial0" disabled={running} {...serial} />
+                        <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-mono text-muted-foreground flex-1">SILENCE ALARM AFTER</span>
+                            <input
+                                type="number"
+                                min="0.5"
+                                step="0.5"
+                                value={silenceTimeout}
+                                onChange={(e) => setSilenceTimeout(e.target.value)}
+                                onBlur={onApplySilence}
+                                onKeyDown={(e) => e.key === "Enter" && onApplySilence()}
+                                data-testid="receiver-silence-timeout-input"
+                                className="h-8 w-20 rounded-md border border-border bg-background px-2 font-mono text-xs tabular-nums"
+                            />
+                            <span className="text-[10px] font-mono text-muted-foreground">s</span>
+                        </div>
                         <div className="flex items-center gap-2">
                             {running ? (
                                 <button
@@ -246,5 +267,6 @@ export default function ReceiverView({
                 </div>
             </section>
         </div>
+        </>
     );
 }

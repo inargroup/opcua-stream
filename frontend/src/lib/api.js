@@ -29,6 +29,9 @@ export const setFormat = (format) => http.post("/runtime/format", { format }).th
 
 export const getSink = () => http.get("/sink").then((r) => r.data);
 export const listSinkTags = () => http.get("/sink/tags").then((r) => r.data);
-export const startSink = (serial_port, baudrate) => http.post("/sink/start", { serial_port, baudrate }).then((r) => r.data);
+export const startSink = (serial_port, baudrate, silence_timeout) =>
+    http.post("/sink/start", { serial_port, baudrate, silence_timeout }).then((r) => r.data);
+export const configSink = (silence_timeout) => http.post("/sink/config", { silence_timeout }).then((r) => r.data);
+export const estimateLink = (format, baudrate) => http.get("/runtime/estimate", { params: { format, baudrate } }).then((r) => r.data);
 export const getSerialPorts = () => http.get("/serial/ports").then((r) => r.data);
 export const stopSink = () => http.post("/sink/stop").then((r) => r.data);
