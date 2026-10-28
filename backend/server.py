@@ -19,6 +19,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from opcua_demo import DemoOPCUAServer
 from opcua_sink import SinkOPCUAServer
+from serial_link import BAUD_RATES, SerialReceiver, SerialSender, list_serial_ports
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -61,27 +62,32 @@ runtime = {
     "fps": 0.0,
     "bps": 0.0,
     "active_tag_count": 0,
+    "serial_port": None,
+    "baudrate": None,
+    "link": None,
 }
+DORMANT_AFTER = 3.0  # min seconds of silence (or 3x the observed sample gap) before a tag is flagged dormant
 
 # ---- Sink / receiver state ----
 sink_server = SinkOPCUAServer()
 sink_state = {
     "running": False,
-    "port": None,
-    "tcp_server": None,
+    "serial_port": None,
+    "baudrate": None,
+    "link": None,
+    "consumer": None,
+    "monitor": None,
     "frames_received": 0,
     "bytes_received": 0,
     "started_at": None,
     "_win_start": 0.0,
     "_win_frames": 0,
     "_win_bytes": 0,
-    "_last_stats": 0.0,
     "fps": 0.0,
     "bps": 0.0,
     "last_seq": 0,
 }
-sink_data = {"tags": {}}  # name -> {name,value,quality,sample_count,first_seen,last_update}
-_ingest_writer = None
+sink_data = {"tags": {}}  # name -> {name,value,quality,state,sample_count,first_seen,last_update}
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +125,8 @@ class TagUpdate(BaseModel):
 
 class RuntimeStart(BaseModel):
     format: str = "json"
+    serial_port: Optional[str] = None
+    baudrate: int = 115200
 
 
 class FormatSet(BaseModel):
@@ -126,7 +134,14 @@ class FormatSet(BaseModel):
 
 
 class SinkStart(BaseModel):
-    port: int = 9800
+    serial_port: str
+    baudrate: int = 115200
+
+
+async def _save_serial_setting(role: str, port: Optional[str], baudrate: int):
+    await db.app_settings.update_one(
+        {"id": "serial"}, {"$set": {f"{role}_port": port, f"{role}_baudrate": baudrate}}, upsert=True
+    )
 
 
 def now_iso():
@@ -343,6 +358,7 @@ async def delete_tag(tag_id: str):
 # ---------------------------------------------------------------------------
 def _runtime_status():
     uptime = (time.time() - runtime["started_at"]) if runtime["started_at"] else 0
+    link = runtime["link"]
     return {
         "active": runtime["active"],
         "format": runtime["format"],
@@ -352,6 +368,11 @@ def _runtime_status():
         "bps": round(runtime["bps"], 1),
         "uptime": round(uptime, 1),
         "active_tag_count": runtime["active_tag_count"],
+        "serial_port": runtime["serial_port"],
+        "baudrate": runtime["baudrate"],
+        "serial_connected": bool(link and link.connected),
+        "serial_error": link.error if link else None,
+        "dropped_frames": link.dropped if link else 0,
     }
 
 
@@ -366,6 +387,19 @@ async def start_runtime(body: RuntimeStart):
         return _runtime_status()
     if body.format not in ("json", "msgpack"):
         raise HTTPException(400, "Invalid format")
+    if body.baudrate not in BAUD_RATES:
+        raise HTTPException(400, "Unsupported baud rate")
+    link = None
+    if body.serial_port:
+        link = SerialSender(body.serial_port, body.baudrate)
+        try:
+            await asyncio.to_thread(link.start)
+        except Exception as e:  # noqa
+            raise HTTPException(502, f"Could not open serial port {body.serial_port}: {e}")
+    await _save_serial_setting("sender", body.serial_port, body.baudrate)
+    runtime["link"] = link
+    runtime["serial_port"] = body.serial_port
+    runtime["baudrate"] = body.baudrate
     runtime["format"] = body.format
     runtime["active"] = True
     runtime["seq"] = 0
@@ -386,6 +420,11 @@ async def stop_runtime():
     if runtime["task"]:
         runtime["task"].cancel()
         runtime["task"] = None
+    link = runtime["link"]
+    if link:
+        link.send(json.dumps({"ctl": "stop", "ts": now_iso()}).encode(), "control")
+        await asyncio.to_thread(link.flush_and_close)
+        runtime["link"] = None
     runtime["started_at"] = None
     runtime["fps"] = 0.0
     runtime["bps"] = 0.0
@@ -474,8 +513,8 @@ async def _transmission_loop():
             runtime["_win_frames"] += 1
             runtime["_win_bytes"] += size
 
-            if sink_state["running"]:
-                await _forward_to_ingest(packed, fmt)
+            if runtime["link"]:
+                runtime["link"].send(packed, fmt)
 
             await sio.emit(
                 "frame",
@@ -508,45 +547,41 @@ async def _transmission_loop():
 
 
 # ---------------------------------------------------------------------------
-# Sink / Receiver — ingest serialized stream over a TCP port and re-publish
-# on a dynamic OPC UA server.
+# Sink / Receiver — ingest serialized stream over a serial port and re-publish
+# on a dynamic OPC UA server. Tags are keyed by name, so a Sender restart
+# revives existing (dormant) tags instead of creating new ones.
 # ---------------------------------------------------------------------------
 def _sink_status():
     uptime = (time.time() - sink_state["started_at"]) if sink_state["started_at"] else 0
+    link = sink_state["link"]
+    tags = sink_data["tags"].values()
     return {
         "running": sink_state["running"],
-        "port": sink_state["port"],
+        "serial_port": sink_state["serial_port"],
+        "baudrate": sink_state["baudrate"],
+        "serial_connected": bool(link and link.connected),
+        "serial_error": link.error if link else None,
+        "crc_errors": link.decoder.crc_errors if link else 0,
         "opcua_endpoint": sink_server.endpoint,
         "frames_received": sink_state["frames_received"],
         "bytes_received": sink_state["bytes_received"],
         "fps": round(sink_state["fps"], 1),
         "bps": round(sink_state["bps"], 1),
         "tag_count": len(sink_data["tags"]),
+        "dormant_count": sum(1 for r in tags if r["state"] == "dormant"),
         "last_seq": sink_state["last_seq"],
         "uptime": round(uptime, 1),
     }
 
 
-async def _forward_to_ingest(packed: bytes, fmt: str):
-    """Transmit a serialized frame to the configured ingest TCP port (loopback)."""
-    global _ingest_writer
-    try:
-        if _ingest_writer is None:
-            _, writer = await asyncio.wait_for(
-                asyncio.open_connection("127.0.0.1", sink_state["port"]), timeout=1.0
-            )
-            _ingest_writer = writer
-        fmt_byte = b"\x00" if fmt == "json" else b"\x01"
-        header = len(packed).to_bytes(4, "big") + fmt_byte
-        _ingest_writer.write(header + packed)
-        await _ingest_writer.drain()
-    except Exception:
-        try:
-            if _ingest_writer:
-                _ingest_writer.close()
-        except Exception:
-            pass
-        _ingest_writer = None
+async def _mark_dormant(names):
+    for name in names:
+        sink_data["tags"][name]["state"] = "dormant"
+        await sink_server.set_dormant(name)
+    if names:
+        logger.info(f"Sink tags dormant: {names}")
+        await sio.emit("sink_dormant", {"names": names})
+        await sio.emit("sink_stats", _sink_status())
 
 
 async def _process_received(core: dict, fmt: str, size: int):
@@ -555,6 +590,7 @@ async def _process_received(core: dict, fmt: str, size: int):
     samples = core.get("samples", [])
     now = time.time()
     new_tags = []
+    revived = []
     out_samples = []
     for s in samples:
         name = s.get("n")
@@ -562,18 +598,26 @@ async def _process_received(core: dict, fmt: str, size: int):
         q = s.get("q")
         if name is None:
             continue
-        is_new = name not in sink_data["tags"]
         await sink_server.upsert(name, val)
         rec = sink_data["tags"].get(name)
         if rec is None:
-            rec = {"name": name, "value": val, "quality": q, "sample_count": 0, "first_seen": now_iso(), "last_update": None}
+            rec = {"name": name, "value": val, "quality": q, "state": "active", "sample_count": 0, "first_seen": now_iso(), "last_update": None}
             sink_data["tags"][name] = rec
             new_tags.append(name)
+        elif rec["state"] == "dormant":
+            rec["state"] = "active"
+            revived.append(name)
         rec["value"] = val
         rec["quality"] = q
         rec["sample_count"] += 1
         rec["last_update"] = ts
-        out_samples.append({"name": name, "value": val, "quality": q, "is_new": is_new})
+        if "_rx" in rec and rec["state"] == "active":
+            rec["_gap"] = now - rec["_rx"]
+        rec["_rx"] = now
+        out_samples.append({"name": name, "value": val, "quality": q, "is_new": name in new_tags})
+
+    if revived:
+        logger.info(f"Sink tags revived: {revived}")
 
     sink_state["frames_received"] += 1
     sink_state["bytes_received"] += size
@@ -583,10 +627,30 @@ async def _process_received(core: dict, fmt: str, size: int):
 
     await sio.emit(
         "sink_frame",
-        {"seq": seq, "ts": ts, "format": fmt, "byte_size": size, "tag_count": len(out_samples), "samples": out_samples, "new_tags": new_tags},
+        {"seq": seq, "ts": ts, "format": fmt, "byte_size": size, "tag_count": len(out_samples), "samples": out_samples, "new_tags": new_tags, "revived": revived},
     )
 
-    if now - sink_state["_last_stats"] >= 0.5:
+
+async def _sink_consumer(q: asyncio.Queue):
+    while True:
+        fmt, payload, size = await q.get()
+        try:
+            if fmt == "control":
+                if json.loads(payload).get("ctl") == "stop":
+                    await _mark_dormant([n for n, r in sink_data["tags"].items() if r["state"] == "active"])
+                continue
+            core = json.loads(payload) if fmt == "json" else msgpack.unpackb(payload, raw=False)
+            await _process_received(core, fmt, size)
+        except Exception as e:  # noqa
+            logger.warning(f"serial frame decode failed: {e}")
+
+
+async def _sink_monitor():
+    while True:
+        await asyncio.sleep(0.5)
+        now = time.time()
+        stale = [n for n, r in sink_data["tags"].items() if r["state"] == "active" and now - r.get("_rx", now) > max(DORMANT_AFTER, 3 * r.get("_gap", 0))]
+        await _mark_dormant(stale)
         win = now - sink_state["_win_start"]
         if win > 0:
             sink_state["fps"] = sink_state["_win_frames"] / win
@@ -594,33 +658,17 @@ async def _process_received(core: dict, fmt: str, size: int):
         sink_state["_win_start"] = now
         sink_state["_win_frames"] = 0
         sink_state["_win_bytes"] = 0
-        sink_state["_last_stats"] = now
         await sio.emit("sink_stats", _sink_status())
 
 
-async def _handle_ingest(reader, writer):
-    peer = writer.get_extra_info("peername")
-    logger.info(f"Ingest connection from {peer}")
-    try:
-        while True:
-            header = await reader.readexactly(5)
-            length = int.from_bytes(header[:4], "big")
-            fmt = "json" if header[4] == 0 else "msgpack"
-            payload = await reader.readexactly(length)
-            try:
-                core = json.loads(payload) if fmt == "json" else msgpack.unpackb(payload, raw=False)
-                await _process_received(core, fmt, length + 5)
-            except Exception as e:  # noqa
-                logger.warning(f"ingest decode failed: {e}")
-    except asyncio.IncompleteReadError:
-        pass
-    except Exception as e:  # noqa
-        logger.debug(f"ingest handler ended: {e}")
-    finally:
-        try:
-            writer.close()
-        except Exception:
-            pass
+def _public_tag(r: dict):
+    return {k: v for k, v in r.items() if not k.startswith("_")}
+
+
+@api_router.get("/serial/ports")
+async def get_serial_ports():
+    settings = await db.app_settings.find_one({"id": "serial"}, {"_id": 0}) or {}
+    return {"ports": await asyncio.to_thread(list_serial_ports), "baud_rates": BAUD_RATES, "settings": settings}
 
 
 @api_router.get("/sink")
@@ -630,60 +678,55 @@ async def get_sink():
 
 @api_router.get("/sink/tags")
 async def get_sink_tags():
-    return sorted(sink_data["tags"].values(), key=lambda r: r["first_seen"])
+    return [_public_tag(r) for r in sorted(sink_data["tags"].values(), key=lambda r: r["first_seen"])]
 
 
 @api_router.post("/sink/start")
 async def start_sink(body: SinkStart):
-    global _ingest_writer
     if sink_state["running"]:
         return _sink_status()
-    if not (1 <= body.port <= 65535):
-        raise HTTPException(400, "Invalid port")
+    if body.baudrate not in BAUD_RATES:
+        raise HTTPException(400, "Unsupported baud rate")
+    q: asyncio.Queue = asyncio.Queue(maxsize=0)
+    link = SerialReceiver(body.serial_port, body.baudrate, asyncio.get_running_loop(), q)
+    try:
+        await asyncio.to_thread(link.start)
+    except Exception as e:  # noqa
+        raise HTTPException(502, f"Could not open serial port {body.serial_port}: {e}")
+    await _save_serial_setting("receiver", body.serial_port, body.baudrate)
     await sink_server.start()
     await sink_server.reset()
     sink_data["tags"] = {}
-    try:
-        tcp_server = await asyncio.start_server(_handle_ingest, "0.0.0.0", body.port)
-    except Exception as e:  # noqa
-        raise HTTPException(502, f"Could not bind ingest port {body.port}: {e}")
-    _ingest_writer = None
     sink_state.update(
         running=True,
-        port=body.port,
-        tcp_server=tcp_server,
+        serial_port=body.serial_port,
+        baudrate=body.baudrate,
+        link=link,
+        consumer=asyncio.create_task(_sink_consumer(q)),
+        monitor=asyncio.create_task(_sink_monitor()),
         frames_received=0,
         bytes_received=0,
         started_at=time.time(),
         _win_start=time.time(),
         _win_frames=0,
         _win_bytes=0,
-        _last_stats=time.time(),
         fps=0.0,
         bps=0.0,
         last_seq=0,
     )
-    logger.info(f"Sink ingest listening on 0.0.0.0:{body.port}")
+    logger.info(f"Sink listening on serial {body.serial_port} @ {body.baudrate}")
     await sio.emit("sink_stats", _sink_status())
     return _sink_status()
 
 
 @api_router.post("/sink/stop")
 async def stop_sink():
-    global _ingest_writer
-    if _ingest_writer:
-        try:
-            _ingest_writer.close()
-        except Exception:
-            pass
-        _ingest_writer = None
-    if sink_state["tcp_server"]:
-        sink_state["tcp_server"].close()
-        try:
-            await sink_state["tcp_server"].wait_closed()
-        except Exception:
-            pass
-    sink_state.update(running=False, tcp_server=None, started_at=None, fps=0.0, bps=0.0)
+    for key in ("consumer", "monitor"):
+        if sink_state[key]:
+            sink_state[key].cancel()
+    if sink_state["link"]:
+        await asyncio.to_thread(sink_state["link"].close)
+    sink_state.update(running=False, link=None, consumer=None, monitor=None, started_at=None, fps=0.0, bps=0.0)
     await sio.emit("sink_stats", _sink_status())
     return _sink_status()
 
@@ -766,8 +809,9 @@ async def on_startup():
 @fastapi_app.on_event("shutdown")
 async def on_shutdown():
     runtime["active"] = False
-    if sink_state["tcp_server"]:
-        sink_state["tcp_server"].close()
+    for link in (runtime["link"], sink_state["link"]):
+        if link:
+            link.close()
     for sid in list(connections.keys()):
         await _disconnect_server(sid)
     await demo_server.stop()

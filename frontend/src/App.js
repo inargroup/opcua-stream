@@ -43,7 +43,12 @@ export default function App() {
     const [sinkTags, setSinkTags] = useState([]);
     const [sinkHistory, setSinkHistory] = useState({});
     const [sinkFrameLog, setSinkFrameLog] = useState([]);
-    const [port, setPort] = useState(9800);
+    const [ports, setPorts] = useState([]);
+    const [bauds, setBauds] = useState([9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600]);
+    const [txPort, setTxPort] = useState("");
+    const [txBaud, setTxBaud] = useState(115200);
+    const [rxPort, setRxPort] = useState("");
+    const [rxBaud, setRxBaud] = useState(115200);
 
     const valuesRef = useRef({});
     const historyRef = useRef({});
@@ -73,7 +78,25 @@ export default function App() {
         }
     }, []);
 
+    const refreshPorts = useCallback(async (applySettings = false) => {
+        try {
+            const d = await api.getSerialPorts();
+            setPorts(d.ports);
+            setBauds(d.baud_rates);
+            if (applySettings) {
+                const st = d.settings || {};
+                if (st.sender_port) setTxPort(st.sender_port);
+                if (st.sender_baudrate) setTxBaud(st.sender_baudrate);
+                if (st.receiver_port) setRxPort(st.receiver_port);
+                if (st.receiver_baudrate) setRxBaud(st.receiver_baudrate);
+            }
+        } catch (e) {
+            /* noop */
+        }
+    }, []);
+
     useEffect(() => {
+        refreshPorts(true);
         refreshServers();
         refreshTags();
         api.getRuntime().then((s) => {
@@ -82,16 +105,19 @@ export default function App() {
         }).catch(() => {});
         api.getSink().then((s) => {
             setSinkStats(s);
-            if (s.port) setPort(s.port);
+            if (s.running) {
+                setRxPort(s.serial_port);
+                setRxBaud(s.baudrate);
+            }
         }).catch(() => {});
         api.listSinkTags().then((rows) => {
             const now = Date.now();
             rows.forEach((r) => {
-                sinkValuesRef.current[r.name] = { name: r.name, value: r.value, quality: r.quality, count: r.sample_count, firstSeen: now, lastTs: r.last_update };
+                sinkValuesRef.current[r.name] = { name: r.name, value: r.value, quality: r.quality, state: r.state, count: r.sample_count, firstSeen: now, lastTs: r.last_update };
             });
             sinkDirtyRef.current = true;
         }).catch(() => {});
-    }, [refreshServers, refreshTags]);
+    }, [refreshServers, refreshTags, refreshPorts]);
 
     // Socket.IO high-speed channel
     useEffect(() => {
@@ -136,6 +162,8 @@ export default function App() {
                 rec.quality = s.quality;
                 rec.count = (rec.count || 0) + 1;
                 rec.lastTs = f.ts;
+                rec.state = "active";
+                if (f.revived && f.revived.includes(name)) rec.revivedUntil = Date.now() + 5000;
                 if (s.is_new || (f.new_tags && f.new_tags.includes(name))) rec.newUntil = Date.now() + 5000;
                 sinkValuesRef.current[name] = rec;
                 let num = null;
@@ -149,7 +177,17 @@ export default function App() {
                 }
             });
             sinkFrameCounterRef.current += 1;
-            const entry = { key: sinkFrameCounterRef.current, seq: f.seq, ts: f.ts, format: f.format, byte_size: f.byte_size, tag_count: f.tag_count, new_tags: f.new_tags };
+            const entry = { key: sinkFrameCounterRef.current, seq: f.seq, ts: f.ts, format: f.format, byte_size: f.byte_size, tag_count: f.tag_count, new_tags: f.new_tags, revived: f.revived };
+            sinkFramesRef.current = sinkFramesRef.current.concat(entry).slice(-60);
+            sinkDirtyRef.current = true;
+        });
+        socket.on("sink_dormant", (d) => {
+            (d.names || []).forEach((name) => {
+                const rec = sinkValuesRef.current[name];
+                if (rec) sinkValuesRef.current[name] = { ...rec, state: "dormant", revivedUntil: 0, newUntil: 0 };
+            });
+            sinkFrameCounterRef.current += 1;
+            const entry = { key: sinkFrameCounterRef.current, seq: 0, ts: new Date().toISOString(), format: "ctl", byte_size: 0, tag_count: 0, dormant: d.names };
             sinkFramesRef.current = sinkFramesRef.current.concat(entry).slice(-60);
             sinkDirtyRef.current = true;
         });
@@ -190,9 +228,13 @@ export default function App() {
         setTagValues({});
         setTagHistory({});
         setFrameLog([]);
-        const s = await api.startRuntime(format);
-        setStats(s);
-        toast.success(`Transmission started · ${format.toUpperCase()}`);
+        try {
+            const s = await api.startRuntime(format, txPort.trim(), txBaud);
+            setStats(s);
+            toast.success(`Transmission started · ${format.toUpperCase()}${s.serial_port ? ` → ${s.serial_port} @ ${s.baudrate}` : ""}`);
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Could not start transmission");
+        }
     };
     const handleStop = async () => {
         const s = await api.stopRuntime();
@@ -217,10 +259,14 @@ export default function App() {
         setSinkTags([]);
         setSinkHistory({});
         setSinkFrameLog([]);
+        if (!rxPort.trim()) {
+            toast.error("Choose the serial port the Sender is wired to");
+            return;
+        }
         try {
-            const s = await api.startSink(Number(port) || 9800);
+            const s = await api.startSink(rxPort.trim(), rxBaud);
             setSinkStats(s);
-            toast.success(`Receiver listening on port ${s.port}`);
+            toast.success(`Receiver listening on ${s.serial_port} @ ${s.baudrate}`);
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Could not start receiver");
         }
@@ -262,6 +308,7 @@ export default function App() {
                                 onStop={handleStop}
                                 onFormat={handleFormat}
                                 frameLog={frameLog}
+                                serial={{ port: txPort, setPort: setTxPort, baud: txBaud, setBaud: setTxBaud, ports, bauds, onRefresh: () => refreshPorts() }}
                             />
                         </div>
                     </div>
@@ -272,8 +319,7 @@ export default function App() {
                         sinkTags={sinkTags}
                         sinkHistory={sinkHistory}
                         sinkFrameLog={sinkFrameLog}
-                        port={port}
-                        setPort={setPort}
+                        serial={{ port: rxPort, setPort: setRxPort, baud: rxBaud, setBaud: setRxBaud, ports, bauds, onRefresh: () => refreshPorts() }}
                         onStart={handleSinkStart}
                         onStop={handleSinkStop}
                         runtimeActive={stats.active}

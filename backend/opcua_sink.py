@@ -1,7 +1,6 @@
 """Sink side: an OPC UA server that ingests the serialized high-speed stream.
 
-- Listens on a user-defined TCP port for length-prefixed serialized frames
-  (4-byte big-endian length + 1-byte format flag [0=json,1=msgpack] + payload).
+- Frames arrive over a serial port (see serial_link.py).
 - Deserializes each frame and DYNAMICALLY creates / updates OPC UA variable
   nodes under a "Received" folder — no prior configuration of tags required.
 - Re-exposes everything on a genuine OPC UA server endpoint so external
@@ -27,14 +26,18 @@ def _norm(value):
     return str(value)
 
 
+VTYPES = {"bool": ua.VariantType.Boolean, "int": ua.VariantType.Int64, "float": ua.VariantType.Double, "str": ua.VariantType.String}
+
+
 class SinkOPCUAServer:
-    def __init__(self, endpoint="opc.tcp://127.0.0.1:4841/emergent/sink/"):
+    def __init__(self, endpoint="opc.tcp://0.0.0.0:4841/emergent/sink/"):
         self.endpoint = endpoint
         self.server = None
         self.idx = None
         self.folder = None
         self.nodes = {}  # name -> Variable node
         self.kinds = {}  # name -> 'bool'|'int'|'float'|'str'
+        self.last = {}  # name -> last written value
 
     async def start(self):
         if self.server is not None:
@@ -60,6 +63,19 @@ class SinkOPCUAServer:
                 pass
         self.nodes = {}
         self.kinds = {}
+        self.last = {}
+
+    async def _write(self, name, value, status):
+        dv = ua.DataValue(ua.Variant(value, VTYPES[self.kinds[name]]), StatusCode=ua.StatusCode(status))
+        await self.nodes[name].write_value(dv)
+
+    async def set_dormant(self, name):
+        """Keep the last value but flag it Uncertain_LastUsableValue for OPC UA clients."""
+        if name in self.nodes:
+            try:
+                await self._write(name, self.last[name], ua.StatusCodes.UncertainLastUsableValue)
+            except Exception as e:
+                logger.debug(f"dormant {name} failed: {e}")
 
     def _coerce(self, name, value):
         kind = self.kinds.get(name)
@@ -83,7 +99,12 @@ class SinkOPCUAServer:
         """
         if name in self.nodes:
             try:
-                await self.nodes[name].write_value(self._coerce(name, value))
+                if value is None:
+                    await self._write(name, self.last[name], ua.StatusCodes.BadNoCommunication)
+                else:
+                    v = self._coerce(name, value)
+                    await self._write(name, v, ua.StatusCodes.Good)
+                    self.last[name] = v
             except Exception as e:  # type drift etc.
                 logger.debug(f"write {name} failed: {e}")
             return False
@@ -92,6 +113,7 @@ class SinkOPCUAServer:
         nodeid = ua.NodeId(f"Received.{name}", self.idx)
         var = await self.folder.add_variable(nodeid, ua.QualifiedName(name, self.idx), v)
         self.nodes[name] = var
+        self.last[name] = v
         logger.info(f"Sink dynamically added tag: {name}")
         return True
 

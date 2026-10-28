@@ -22,11 +22,13 @@ export const updateTag = (id, payload) => http.put(`/tags/${id}`, payload).then(
 export const deleteTag = (id) => http.delete(`/tags/${id}`).then((r) => r.data);
 
 export const getRuntime = () => http.get("/runtime").then((r) => r.data);
-export const startRuntime = (format) => http.post("/runtime/start", { format }).then((r) => r.data);
+export const startRuntime = (format, serial_port, baudrate) =>
+    http.post("/runtime/start", { format, serial_port: serial_port || null, baudrate }).then((r) => r.data);
 export const stopRuntime = () => http.post("/runtime/stop").then((r) => r.data);
 export const setFormat = (format) => http.post("/runtime/format", { format }).then((r) => r.data);
 
 export const getSink = () => http.get("/sink").then((r) => r.data);
 export const listSinkTags = () => http.get("/sink/tags").then((r) => r.data);
-export const startSink = (port) => http.post("/sink/start", { port }).then((r) => r.data);
+export const startSink = (serial_port, baudrate) => http.post("/sink/start", { serial_port, baudrate }).then((r) => r.data);
+export const getSerialPorts = () => http.get("/serial/ports").then((r) => r.data);
 export const stopSink = () => http.post("/sink/stop").then((r) => r.data);

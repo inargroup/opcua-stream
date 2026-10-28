@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Play, Square, Braces, Binary, Radio } from "lucide-react";
+import SerialPortPicker from "@/components/opcua/SerialPortPicker";
 
 const fmtBytes = (b) => {
     if (b > 1048576) return `${(b / 1048576).toFixed(2)} MB`;
@@ -25,7 +26,7 @@ function Stat({ label, value, accent }) {
     );
 }
 
-export default function SerialMonitor({ stats, format, onStart, onStop, onFormat, frameLog }) {
+export default function SerialMonitor({ stats, format, onStart, onStop, onFormat, frameLog, serial }) {
     const termRef = useRef(null);
 
     useEffect(() => {
@@ -69,6 +70,17 @@ export default function SerialMonitor({ stats, format, onStart, onStop, onFormat
                         </button>
                     </div>
                 </div>
+
+                <SerialPortPicker prefix="sender" label="Output Serial Port (to Receiver)" placeholder="/dev/serial0 — leave empty for local only" disabled={stats.active} {...serial} />
+                {stats.active && (
+                    <div className="flex items-center justify-between rounded-md border border-border bg-background px-3 py-1.5 font-mono text-[10px]" data-testid="sender-serial-status">
+                        <span className={stats.serial_port ? (stats.serial_connected ? "text-emerald-400" : "text-red-400") : "text-muted-foreground"}>
+                            {stats.serial_port ? `${stats.serial_connected ? "● TX" : "✕ ERR"} ${stats.serial_port} @ ${stats.baudrate}` : "○ No serial output (local only)"}
+                        </span>
+                        <span className="text-muted-foreground">dropped {stats.dropped_frames || 0}</span>
+                    </div>
+                )}
+                {stats.serial_error && <p className="text-[10px] font-mono text-red-400 break-all" data-testid="sender-serial-error">{stats.serial_error}</p>}
 
                 {stats.active ? (
                     <button
