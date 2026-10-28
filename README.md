@@ -14,7 +14,7 @@ Both devices run the same app. Use the **same baud rate** on both sides.
 `A5 5A | fmt (0=json,1=msgpack,2=control) | length (4B BE) | payload | CRC32 (4B BE)` — the Receiver
 re-synchronises on noise and counts CRC errors. When the Sender stops it sends a control frame and the
 Receiver immediately marks all tags **DORMANT** (last value kept, OPC UA status `Uncertain_LastUsableValue`).
-Tags also turn dormant after ~3 s (or 3× their normal update gap) of silence. When the Sender restarts,
+Tags also turn dormant after ~3 s (or 3× their sampling interval) of silence. When the Sender restarts,
 the existing tags are **revived** — no duplicate nodes are created.
 
 ## Raspberry Pi OS install

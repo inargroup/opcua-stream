@@ -1,0 +1,43 @@
+{
+  "summary": "Tested the serial-port Sender->Receiver link over the socat pair /tmp/ttyV0<->/tmp/ttyV1. Backend: new pytest suite test_serial_sink.py, 6/6 passing. It covers /api/serial/ports, sink/runtime validation (502 bad port, 400 bad baud), local-only runtime, 4 stop/start cycles alternating JSON and MessagePack (tag_count stays 9, no duplicates, crc_errors 0, all tags dormant within 0.14-0.36s of stop, values kept, sink_frame 'revived' list has all 9 tags, new_tags only in the first session), and an external asyncua client reading the sink (9 nodes; UncertainLastUsableValue when dormant, Good when active). Frontend: Playwright tested both Runtime and Receiver modes. Ports are prefilled from saved settings. Empty-port toast works. Status shows 'TX /tmp/ttyV0 @ 115200'. Tiles go NEW/GOOD -> DORMANT (dimmed) -> REVIVED -> GOOD over 3 UI stop/start cycles with 9 tiles throughout, and the local-only start works. Found and fixed one frontend bug: every socket event was handled twice. One UX bug is open: the bad-port toast shows a Cloudflare HTML message.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/sink/start, POST /api/runtime/start", "issue": "A serial port that cannot be opened returns HTTP 502. Through the preview ingress (Cloudflare), a 502 from the server is replaced by Cloudflare's HTML error page, so the JSON 'detail' never reaches the client. The UI then shows the toast 'The origin web server returned an invalid or incomplete response to Cloudflare...' instead of 'Could not open serial port ...'. Use 400, 409 or 422 for this error."},
+      {"endpoint": "_sink_monitor", "issue": "A tag sampled less often than every 3s (PowerConsumption, every 10s) is marked DORMANT about 3s after its first sample while the Sender is still streaming. It is revived at its second sample, once _gap has been learned. This gives a brief false dormancy at the start of each Receiver session."},
+      {"endpoint": "GET /api/serial/ports", "issue": "settings includes the internal key 'id':'serial' (harmless)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "App.js Socket.IO effect", "issue": "FIXED. Under React.StrictMode the effect runs twice. The cleanup only disconnected if socket.connected, which is still false at that moment, so two sockets stayed alive. Every frame, sink_frame and sink_dormant event was processed twice: duplicate terminal lines and doubled sample counts. The cleanup now calls socket.removeAllListeners() and socket.disconnect() without the condition. Re-verified: no duplicate lines and correct sample counts.", "selector": "[data-testid=receiver-terminal], [data-testid=serial-terminal]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Bad serial port start (Receiver and Sender)", "issue": "The error toast shows Cloudflare's 502 HTML message instead of the backend detail (see backend minor issue 1).", "affected_selectors": ["start-receiver-btn", "start-transmission-btn"]}
+    ],
+    "design_issues": [
+      {"screen": "Receiver", "issues": ["handleSinkStart clears the visible tiles and history before validating the port. Clicking Start with an empty port wipes the tiles shown on screen; the backend tags are untouched. Validate first, then reset.", "start-source-btn calls handleStart with txPort. If the Sender port is empty, the Sender starts local-only and the Receiver gets nothing, with no hint to the user."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_serial_sink.py", "/app/test_reports/pytest/serial_results.xml"],
+  "action_items": [
+    "Return 400 or 409 (not 502) when the serial port cannot be opened in /api/sink/start and /api/runtime/start, so the toast shows the real error behind the ingress.",
+    "Optional: for tags whose sample gap is not yet known, delay dormancy using the source sampling_interval (send it in the frame), or require 2 samples before applying the 3s rule.",
+    "Optional: in handleSinkStart, validate rxPort before clearing tiles; in start-source-btn, warn if txPort is empty."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 832 lines. Split it into modules: runtime / sink / opcua client routes.",
+    "start_sink: if sink_server.start() raises after link.start() succeeded, the serial port stays open and the background thread keeps running (a resource leak). Wrap this in try/except and call link.close().",
+    "SerialSender._reopen loops forever on a write failure until stop. That is fine, but frames keep being dropped silently; only the 'dropped' counter shows it.",
+    "The stop control frame depends on a graceful stop. If the cable is pulled, the 3s or 3x-gap monitor handles it (by design).",
+    "Raspberry Pi install.sh passes bash -n."
+  ],
+  "updated_files": ["/app/frontend/src/App.js (socket effect cleanup)", "/app/backend/tests/test_serial_sink.py (new)", "/app/backend/tests/test_sink.py (deleted - obsolete TCP 9800 tests)"],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "~95% (all flows pass; bad-port toast message wrong due to 502 via ingress)"},
+  "test_credentials": "No auth",
+  "seed_data_creation": "None. Sink left running on /tmp/ttyV1 with 9 dormant tags; runtime stopped.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "socat pair /tmp/ttyV0 (tx) <-> /tmp/ttyV1 (rx). Run: pytest backend/tests/test_serial_sink.py (it stops runtime and sink first). Sink OPC UA: opc.tcp://127.0.0.1:4841/emergent/sink/, ns http://emergent.sink/opcua, folder Received. Editing backend files wipes in-memory sink state.",
+  "rca of the issue": "Duplicate socket events: React 18 StrictMode mounts, unmounts and remounts effects in dev. The cleanup's 'if connected' guard skipped disconnecting the first, still-connecting socket, so two live sockets each ran the handlers. Fixed by always disconnecting in the cleanup. Cloudflare toast: the backend returns 502 for serial open errors, and the Cloudflare edge swaps any 5xx 502 body for its own HTML page."
+}

@@ -192,7 +192,8 @@ export default function App() {
             sinkDirtyRef.current = true;
         });
         return () => {
-            if (socketRef.current?.connected) socketRef.current.disconnect();
+            socket.removeAllListeners();
+            socket.disconnect();
         };
     }, []);
 
@@ -252,19 +253,19 @@ export default function App() {
     };
 
     const handleSinkStart = async () => {
-        sinkValuesRef.current = {};
-        sinkHistoryRef.current = {};
-        sinkFramesRef.current = [];
-        sinkFrameCounterRef.current = 0;
-        setSinkTags([]);
-        setSinkHistory({});
-        setSinkFrameLog([]);
         if (!rxPort.trim()) {
             toast.error("Choose the serial port the Sender is wired to");
             return;
         }
         try {
             const s = await api.startSink(rxPort.trim(), rxBaud);
+            sinkValuesRef.current = {};
+            sinkHistoryRef.current = {};
+            sinkFramesRef.current = [];
+            sinkFrameCounterRef.current = 0;
+            setSinkTags([]);
+            setSinkHistory({});
+            setSinkFrameLog([]);
             setSinkStats(s);
             toast.success(`Receiver listening on ${s.serial_port} @ ${s.baudrate}`);
         } catch (e) {
@@ -277,6 +278,10 @@ export default function App() {
         toast("Receiver stopped");
     };
     const handleStartSource = async () => {
+        if (!txPort.trim()) {
+            toast.error("Set the Sender's output serial port in Runtime mode first");
+            return;
+        }
         await handleStart();
     };
 

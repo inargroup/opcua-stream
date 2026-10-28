@@ -66,7 +66,7 @@ runtime = {
     "baudrate": None,
     "link": None,
 }
-DORMANT_AFTER = 3.0  # min seconds of silence (or 3x the observed sample gap) before a tag is flagged dormant
+DORMANT_AFTER = 3.0  # min seconds of silence (or 3x the tag's sampling interval) before a tag is flagged dormant
 
 # ---- Sink / receiver state ----
 sink_server = SinkOPCUAServer()
@@ -395,7 +395,7 @@ async def start_runtime(body: RuntimeStart):
         try:
             await asyncio.to_thread(link.start)
         except Exception as e:  # noqa
-            raise HTTPException(502, f"Could not open serial port {body.serial_port}: {e}")
+            raise HTTPException(409, f"Could not open serial port {body.serial_port}: {e}")
     await _save_serial_setting("sender", body.serial_port, body.baudrate)
     runtime["link"] = link
     runtime["serial_port"] = body.serial_port
@@ -487,6 +487,7 @@ async def _transmission_loop():
                         "node_id": tag["node_id"],
                         "server_id": tag["server_id"],
                         "unit": tag.get("unit"),
+                        "interval": tag.get("sampling_interval", 200),
                         "value": val,
                         "quality": quality,
                     }
@@ -497,7 +498,7 @@ async def _transmission_loop():
             core = {
                 "seq": runtime["seq"],
                 "ts": now_iso(),
-                "samples": [{"n": s["name"], "v": s["value"], "q": s["quality"]} for s in due_samples],
+                "samples": [{"n": s["name"], "v": s["value"], "q": s["quality"], "i": s["interval"]} for s in due_samples],
             }
             fmt = runtime["format"]
             if fmt == "json":
@@ -611,8 +612,7 @@ async def _process_received(core: dict, fmt: str, size: int):
         rec["quality"] = q
         rec["sample_count"] += 1
         rec["last_update"] = ts
-        if "_rx" in rec and rec["state"] == "active":
-            rec["_gap"] = now - rec["_rx"]
+        rec["_interval"] = (s.get("i") or 0) / 1000.0
         rec["_rx"] = now
         out_samples.append({"name": name, "value": val, "quality": q, "is_new": name in new_tags})
 
@@ -649,7 +649,7 @@ async def _sink_monitor():
     while True:
         await asyncio.sleep(0.5)
         now = time.time()
-        stale = [n for n, r in sink_data["tags"].items() if r["state"] == "active" and now - r.get("_rx", now) > max(DORMANT_AFTER, 3 * r.get("_gap", 0))]
+        stale = [n for n, r in sink_data["tags"].items() if r["state"] == "active" and now - r.get("_rx", now) > max(DORMANT_AFTER, 3 * r.get("_interval", 0))]
         await _mark_dormant(stale)
         win = now - sink_state["_win_start"]
         if win > 0:
@@ -667,7 +667,7 @@ def _public_tag(r: dict):
 
 @api_router.get("/serial/ports")
 async def get_serial_ports():
-    settings = await db.app_settings.find_one({"id": "serial"}, {"_id": 0}) or {}
+    settings = await db.app_settings.find_one({"id": "serial"}, {"_id": 0, "id": 0}) or {}
     return {"ports": await asyncio.to_thread(list_serial_ports), "baud_rates": BAUD_RATES, "settings": settings}
 
 
@@ -692,7 +692,7 @@ async def start_sink(body: SinkStart):
     try:
         await asyncio.to_thread(link.start)
     except Exception as e:  # noqa
-        raise HTTPException(502, f"Could not open serial port {body.serial_port}: {e}")
+        raise HTTPException(409, f"Could not open serial port {body.serial_port}: {e}")
     await _save_serial_setting("receiver", body.serial_port, body.baudrate)
     await sink_server.start()
     await sink_server.reset()

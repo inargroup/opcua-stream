@@ -31,11 +31,21 @@ An OPC UA client that connects to multiple OPC UA servers. Users define source s
 - Endpoints: `GET/POST /api/sink`, `/api/sink/start` `{port}`, `/api/sink/stop`, `GET /api/sink/tags`. Socket.IO events `sink_frame` + `sink_stats`.
 - Data types preserved on re-publish (Boolean/Int64/Double/String).
 
+## Implemented — Serial link + Raspberry Pi (2026-06)
+- TCP Sender→Receiver link REPLACED by serial port (`backend/serial_link.py`, pyserial). Frame: `A5 5A | fmt | len32 | payload | CRC32`; resync + CRC error count; non-blocking writer queue with dropped counter; auto-reopen on port loss.
+- Sender (Runtime → Serial Channel): output port + baud list (9600–2,000,000). Empty port = local only. Receiver: input port + baud. Last ports saved in Mongo `app_settings` (`GET /api/serial/ports`).
+- Dormant tags: Sender stop sends control frame → all receiver tags DORMANT (last value kept, OPC UA status `UncertainLastUsableValue`); silence > max(3s, 3×sampling interval) also → dormant. Sender restart revives the same nodes (no duplicates). Receiver restart resets tags (user choice).
+- Sink OPC UA endpoint now binds `0.0.0.0:4841`. Bad port → 409.
+- Pi deliverables: `scripts/raspberry-pi/install.sh` (venv, yarn build, Mongo via Docker 4.4.18/7, dialout, systemd + nginx), `virtual-serial-pair.sh` (socat bench test), README.
+- Tested iteration_4: backend 6/6 (`backend/tests/test_serial_sink.py`), frontend flows pass; fixed StrictMode double socket, 502→409, false early dormancy, reset-before-validate.
+
 ## Test Status
 - Backend: 9/9 pytest pass (CRUD, browse, runtime, Socket.IO connect/stats/frames, json vs msgpack size). `/app/backend/tests/backend_test.py`.
 - Frontend: 100% (iteration_2) — runtime streaming, tiles, terminal, format toggle, stop/restart all verified on live URL.
 
 ## Backlog / Next
+- P1: Verify on real Raspberry Pi hardware (UART /dev/serial0 and USB adapters).
+- P1: Optional RS-485 half-duplex (DE/RE pin) support.
 - P1: Add `data-testid` to individual KPI values (frames-tx, data-rate, uptime) for automation robustness.
 - P1: Historical trend view / multi-tag chart overlay.
 - P2: Export/import full configuration (servers + tags) as JSON.
